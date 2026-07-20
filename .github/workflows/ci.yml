@@ -32,3 +32,21 @@ jobs:
       - run: pnpm --filter @incidentlens/web lint
       - run: pnpm --filter @incidentlens/web typecheck
       - run: pnpm --filter @incidentlens/web build
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the application stack
+        run: docker compose up --build --wait --wait-timeout 180
+      - name: Verify the public health endpoint
+        run: curl --fail --retry 12 --retry-delay 2 http://127.0.0.1:3000/health/ready
+      - name: Show Compose diagnostics on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color
+      - name: Remove test containers and volumes
+        if: always()
+        run: docker compose down --volumes --remove-orphans
