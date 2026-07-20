@@ -1,0 +1,13 @@
+{
+  "name": "incidentlens",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --filter @incidentlens/web dev",
+    "build": "pnpm --filter @incidentlens/web build",
+    "lint": "pnpm --filter @incidentlens/web lint",
+    "typecheck": "pnpm --filter @incidentlens/web typecheck",
+    "test:web": "pnpm --filter @incidentlens/web test",
+    "test": "pnpm test:web"
+  }
+}

@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install uv
+      - run: uv sync --locked --extra dev
+      - run: uv run pytest --cov=incidentlens --cov-report=term-missing
+      - run: uv run ruff check .
+      - run: uv run mypy services/api/incidentlens
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: "11.9.0" }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @incidentlens/web test
+      - run: pnpm --filter @incidentlens/web lint
+      - run: pnpm --filter @incidentlens/web typecheck
+      - run: pnpm --filter @incidentlens/web build

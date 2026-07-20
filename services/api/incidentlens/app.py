@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections import defaultdict
+from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime
+from hashlib import sha256
+from typing import Annotated, Literal
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from redis import Redis
+from sse_starlette.sse import EventSourceResponse
+
+from incidentlens.auth import Role, require_role
+from incidentlens.config import Settings, get_settings
+from incidentlens.db import InvestigationStore, create_session_factory
+from incidentlens.evals import EvaluationRunner
+from incidentlens.model_client import build_model_client
+from incidentlens.observability import configure_observability
+from incidentlens.scenarios import ScenarioRepository
+from incidentlens.schemas import IncidentCase
+from incidentlens.workflow import InvestigationEngine
+
+
+class InvestigationCreate(BaseModel):
+    incident_case_id: str
+    mode: Literal["live", "replay"] = "live"
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+
+
+def create_app(*, testing: bool = False) -> FastAPI:
+    settings = Settings(
+        database_url="sqlite://" if testing else get_settings().database_url,
+        task_mode="inline" if testing else get_settings().task_mode,
+    )
+    repository = ScenarioRepository.seeded()
+    session_factory = create_session_factory(settings.database_url, testing=testing)
+    store = InvestigationStore(session_factory)
+    for persisted_case in store.list_incidents():
+        repository.add_case(persisted_case)
+    engine = InvestigationEngine(
+        model_client=build_model_client(
+            base_url=settings.model_base_url,
+            api_key=settings.model_api_key,
+            model=settings.model_name,
+            max_cost_cny=settings.max_cost_cny,
+        )
+    )
+    replay_engine = InvestigationEngine()
+    replay_cache = {
+        case.id: replay_engine.run(
+            case, investigation_id=f"replay-{case.id}"
+        ).report.model_dump(mode="json")
+        for case in repository.list_cases()
+    }
+    daily_runs: dict[tuple[date, str], int] = defaultdict(int)
+
+    app = FastAPI(
+        title="IncidentLens API",
+        version="0.1.0",
+        description="Evidence-first production incident investigation assistant",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    telemetry = configure_observability(app)
+    app.state.repository = repository
+    app.state.store = store
+    app.state.settings = settings
+    app.state.replay_cache = replay_cache
+
+    runner = require_role(settings, "runner", "admin")
+    admin = require_role(settings, "admin")
+
+    @app.get("/health/live")
+    def health_live() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    def health_ready() -> dict[str, str]:
+        try:
+            store.ping()
+            if settings.task_mode == "celery":
+                Redis.from_url(settings.redis_url, socket_timeout=1).ping()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail="A required dependency is unavailable"
+            ) from exc
+        return {"status": "ready"}
+
+    @app.get("/api/v1/incidents")
+    def list_incidents() -> list[dict[str, object]]:
+        return [case.to_public().model_dump(mode="json") for case in repository.list_cases()]
+
+    @app.get("/api/v1/incidents/{case_id}")
+    def get_incident(case_id: str) -> dict[str, object]:
+        try:
+            return repository.get_case(case_id).to_public().model_dump(mode="json")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/incidents/import", status_code=status.HTTP_201_CREATED)
+    async def import_incident(
+        _role: Role = Depends(admin), file: UploadFile = File(...)
+    ) -> dict[str, object]:
+        filename = file.filename or ""
+        if "/" in filename or "\\" in filename or filename in {".", ".."}:
+            raise HTTPException(status_code=400, detail="Incident filename must not contain a path")
+        if file.content_type != "application/json" or not filename.lower().endswith(".json"):
+            raise HTTPException(status_code=415, detail="Only JSON incident packs are accepted")
+        content = await file.read(50 * 1024 * 1024 + 1)
+        if len(content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Incident pack exceeds 50 MB")
+        try:
+            case = IncidentCase.model_validate_json(content)
+            package_hash = sha256(content).hexdigest()
+            store.save_incident(case, package_hash)
+            repository.add_case(case)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        store.record_audit(
+            actor=_role,
+            action="incident.imported",
+            resource_id=case.id,
+            detail={"package_hash": package_hash, "size_bytes": len(content)},
+        )
+        return case.to_public().model_dump(mode="json")
+
+    @app.post("/api/v1/investigations", status_code=status.HTTP_202_ACCEPTED)
+    def create_investigation(
+        payload: InvestigationCreate,
+        role: Role = Depends(runner),
+        authorization: Annotated[str | None, Header()] = None,
+        idempotency_key: Annotated[
+            str | None, Header(alias="Idempotency-Key", max_length=128)
+        ] = None,
+    ) -> dict[str, object]:
+        try:
+            case = repository.get_case(payload.incident_case_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            record, created = store.create_idempotent(
+                case.id, payload.mode, idempotency_key=idempotency_key
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not created:
+            return {
+                "investigation_id": record.id,
+                "status": record.status,
+                "mode": record.mode,
+                "idempotent_replay": True,
+            }
+
+        store.record_audit(
+            actor=role,
+            action="investigation.created",
+            resource_id=record.id,
+            detail={"case_id": case.id, "mode": payload.mode},
+        )
+
+        token = authorization or role
+        rate_key = (datetime.now(UTC).date(), token)
+        if role != "admin" and daily_runs[rate_key] >= settings.runner_daily_limit:
+            store.mark_status(record.id, "canceled")
+            raise HTTPException(status_code=429, detail="Daily live-run quota exhausted")
+        if payload.mode == "live":
+            daily_runs[rate_key] += 1
+
+        if settings.task_mode == "inline" or payload.mode == "replay":
+            result = engine.run(
+                case,
+                investigation_id=record.id,
+                on_event=lambda event: store.append_event(record.id, event),
+            )
+            store.save_result(record.id, result)
+            telemetry.record_report(
+                prompt_tokens=result.report.model_usage.prompt_tokens,
+                completion_tokens=result.report.model_usage.completion_tokens,
+                cost_cny=result.report.total_cost_cny,
+                tool_calls=result.report.model_usage.tool_calls,
+                latency_ms=result.report.total_latency_ms,
+            )
+        else:
+            from incidentlens.tasks import run_investigation
+
+            run_investigation.delay(
+                record.id,
+                case.model_dump_json(),
+                settings.database_url,
+            )
+        return {
+            "investigation_id": record.id,
+            "status": "queued",
+            "mode": payload.mode,
+            "idempotent_replay": False,
+        }
+
+    @app.get("/api/v1/investigations/{investigation_id}")
+    def get_investigation(investigation_id: str) -> dict[str, object]:
+        value = store.get(investigation_id)
+        if value is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        return value
+
+    @app.get("/api/v1/investigations/{investigation_id}/events")
+    def investigation_events(request: Request, investigation_id: str) -> EventSourceResponse:
+        if store.get(investigation_id) is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        header = request.headers.get("last-event-id", "0")
+        try:
+            after = max(int(header), 0)
+        except ValueError:
+            after = 0
+
+        async def stream() -> AsyncIterator[dict[str, str]]:
+            cursor = after
+            terminal = {"completed", "failed", "canceled", "inconclusive"}
+            while True:
+                if await request.is_disconnected():
+                    return
+                events = store.events_after(investigation_id, cursor)
+                for event in events:
+                    cursor = int(event["sequence"])
+                    yield {
+                        "id": str(cursor),
+                        "event": str(event["type"]),
+                        "data": json.dumps(event, ensure_ascii=False),
+                    }
+                current = store.get(investigation_id)
+                if current is None or (current["status"] in terminal and not events):
+                    return
+                await asyncio.sleep(0.2)
+
+        return EventSourceResponse(stream(), ping=15)
+
+    @app.post("/api/v1/investigations/{investigation_id}/cancel", status_code=202)
+    def cancel_investigation(
+        investigation_id: str, role: Role = Depends(runner)
+    ) -> dict[str, str]:
+        if not store.cancel(investigation_id):
+            raise HTTPException(status_code=409, detail="Investigation cannot be canceled")
+        store.record_audit(
+            actor=role,
+            action="investigation.canceled",
+            resource_id=investigation_id,
+        )
+        return {"status": "canceled"}
+
+    @app.post(
+        "/api/v1/investigations/{investigation_id}/remediations/{proposal_id}/approve"
+    )
+    def approve_remediation(
+        investigation_id: str,
+        proposal_id: str,
+        role: Role = Depends(admin),
+    ) -> dict[str, object]:
+        try:
+            return store.approve_and_simulate(investigation_id, proposal_id, actor=role)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Remediation not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/v1/eval-runs")
+    def create_eval_run(_role: Role = Depends(admin)) -> dict[str, object]:
+        result = EvaluationRunner(repository).run(include_hidden=True)
+        store.record_audit(
+            actor=_role,
+            action="evaluation.completed",
+            resource_id=f"eval-{datetime.now(UTC).isoformat()}",
+            detail={"case_count": result.case_count, "root_cause_top1": result.root_cause_top1},
+        )
+        return result.model_dump()
+
+    @app.get("/api/v1/demo/replays/{case_id}")
+    def replay(case_id: str) -> dict[str, object]:
+        try:
+            case = repository.get_case(case_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if case.visibility != "showcase":
+            raise HTTPException(status_code=404, detail="Replay not found")
+        cached = replay_cache.get(case.id)
+        if cached is None:
+            raise HTTPException(status_code=404, detail="Replay not found")
+        return cached
+
+    @app.get("/api/v1/openapi.json", include_in_schema=False)
+    def openapi_alias(response: Response) -> dict[str, object]:
+        response.headers["Cache-Control"] = "public, max-age=300"
+        return app.openapi()
+
+    return app
+
+
+app = create_app()

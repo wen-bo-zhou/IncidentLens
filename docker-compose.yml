@@ -1,0 +1,134 @@
+name: incidentlens
+
+x-api-environment: &api-environment
+  DATABASE_URL: postgresql+psycopg://incidentlens:incidentlens@postgres:5432/incidentlens
+  REDIS_URL: redis://redis:6379/0
+  TASK_MODE: celery
+  MODEL_BASE_URL: ${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  MODEL_API_KEY: ${MODEL_API_KEY:-}
+  MODEL_NAME: ${MODEL_NAME:-qwen-plus}
+  MAX_COST_CNY: ${MAX_COST_CNY:-0.20}
+  RUNNER_TOKEN: ${RUNNER_TOKEN:-runner-demo-token}
+  ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-demo-token}
+  RUNNER_DAILY_LIMIT: ${RUNNER_DAILY_LIMIT:-10}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: incidentlens
+      POSTGRES_USER: incidentlens
+      POSTGRES_PASSWORD: incidentlens
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U incidentlens"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment: *api-environment
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    command: ["celery", "-A", "incidentlens.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment: *api-environment
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ""
+    environment:
+      API_PROXY_TARGET: http://api:8000
+    depends_on:
+      api: { condition: service_healthy }
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - web
+      - api
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.140.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./infra/otel-collector.yml:/etc/otelcol/config.yml:ro
+    ports:
+      - "4317:4317"
+    depends_on:
+      - tempo
+
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    profiles: ["observability"]
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  tempo:
+    image: grafana/tempo:2.9.0
+    profiles: ["observability"]
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./infra/tempo.yml:/etc/tempo.yml:ro
+
+  grafana:
+    image: grafana/grafana:12.3.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: incidentlens
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./infra/grafana-datasources.yml:/etc/grafana/provisioning/datasources/incidentlens.yml:ro
+    depends_on:
+      - prometheus
+      - tempo
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
