@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from celery import Celery
 from sqlalchemy.exc import OperationalError
 
@@ -29,26 +31,44 @@ def run_investigation(investigation_id: str, case_json: str, database_url: str) 
     store = InvestigationStore(create_session_factory(database_url))
     if store.is_canceled(investigation_id):
         return
-    case = IncidentCase.model_validate_json(case_json)
-    engine = InvestigationEngine(
-        model_client=build_model_client(
-            base_url=settings.model_base_url,
-            api_key=settings.model_api_key,
-            model=settings.model_name,
-            max_cost_cny=settings.max_cost_cny,
-        )
-    )
 
     class InvestigationCanceled(Exception):
         pass
 
-    def persist(event: WorkflowEvent) -> None:
-        if store.is_canceled(investigation_id):
-            raise InvestigationCanceled
-        store.append_event(investigation_id, event)
-
     try:
+        case = IncidentCase.model_validate_json(case_json)
+        engine = InvestigationEngine(
+            model_client=build_model_client(
+                base_url=settings.model_base_url,
+                api_key=settings.model_api_key,
+                model=settings.model_name,
+                max_cost_cny=settings.max_cost_cny,
+            )
+        )
+
+        def persist(event: WorkflowEvent) -> None:
+            if store.is_canceled(investigation_id):
+                raise InvestigationCanceled
+            store.append_event(investigation_id, event)
+
         result = engine.run(case, investigation_id=investigation_id, on_event=persist)
     except InvestigationCanceled:
         return
+    except OperationalError:
+        raise
+    except Exception as exc:
+        events = store.events_after(investigation_id, 0)
+        next_sequence = max((int(event["sequence"]) for event in events), default=0) + 1
+        store.append_event(
+            investigation_id,
+            WorkflowEvent(
+                sequence=next_sequence,
+                type="run_failed",
+                stage="failed",
+                message="Investigation worker failed",
+                payload={"error_type": type(exc).__name__},
+                created_at=datetime.now(UTC),
+            ),
+        )
+        raise
     store.save_result(investigation_id, result)

@@ -30,7 +30,11 @@ class EvaluationRunner:
         self.baseline = OneShotBaseline()
 
     def run(self, *, include_hidden: bool = True) -> EvaluationSummary:
-        cases = self.repository.list_cases(include_hidden=include_hidden)
+        cases = [
+            case
+            for case in self.repository.list_cases(include_hidden=include_hidden)
+            if case.ground_truth is not None
+        ]
         root_hits = 0
         showcase_hits = 0
         showcase_count = 0
@@ -51,15 +55,15 @@ class EvaluationRunner:
         latencies: list[int] = []
 
         for case in cases:
+            truth = case.ground_truth
+            assert truth is not None
             baseline = self.baseline.run(case)
             result = self.engine.run(case)
             report = result.report
             top = report.ranked_hypotheses[0] if report.ranked_hypotheses else None
-            is_hit = bool(top and top.root_cause_category == case.ground_truth.expected_root_cause)
+            is_hit = bool(top and top.root_cause_category == truth.expected_root_cause)
             root_hits += int(is_hit)
-            baseline_hits += int(
-                baseline.root_cause_category == case.ground_truth.expected_root_cause
-            )
+            baseline_hits += int(baseline.root_cause_category == truth.expected_root_cause)
             if case.visibility == "showcase":
                 showcase_count += 1
                 showcase_hits += int(is_hit)
@@ -72,7 +76,7 @@ class EvaluationRunner:
             }
             citation_total += len(cited_ids)
             citation_valid += len(cited_ids & valid_ids)
-            required = set(case.ground_truth.required_evidence_ids)
+            required = set(truth.required_evidence_ids)
             required_total += len(required)
             required_found += len(required & cited_ids)
             baseline_required_found += len(required & set(baseline.evidence_ids))
@@ -80,15 +84,15 @@ class EvaluationRunner:
             if top:
                 actual_chain = {step.casefold() for step in top.causal_chain}
                 expected_chain = {
-                    step.casefold() for step in case.ground_truth.expected_causal_chain
+                    step.casefold() for step in truth.expected_causal_chain
                 }
                 chain_total += len(expected_chain)
                 chain_found += len(actual_chain & expected_chain)
             selected_actions = {
                 action.action_type for action in report.recommended_actions
             }
-            expected_actions = set(case.ground_truth.expected_actions)
-            forbidden_actions = set(case.ground_truth.forbidden_actions)
+            expected_actions = set(truth.expected_actions)
+            forbidden_actions = set(truth.forbidden_actions)
             action_total += len(expected_actions)
             action_correct += len(selected_actions & expected_actions)
             forbidden_selected += len(selected_actions & forbidden_actions)

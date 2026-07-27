@@ -15,6 +15,7 @@ const incident: IncidentCase = {
   ends_at: "2026-01-10T10:00:00Z",
   services: ["checkout-service", "payment-service"],
   evidence_count: 6,
+  replay_available: true,
   severity: "SEV-2",
 };
 
@@ -121,7 +122,61 @@ describe("InvestigationWorkspace", () => {
     await user.type(screen.getByLabelText("Runner 令牌"), "runner-demo-token");
     await user.click(screen.getByRole("button", { name: "确认启动" }));
 
-    expect(runLive).toHaveBeenCalledWith("runner-demo-token");
+    expect(runLive).toHaveBeenCalledWith("runner-demo-token", {
+      startAt: incident.starts_at,
+      endAt: incident.ends_at,
+    });
     expect(screen.queryByLabelText("Runner 令牌")).not.toBeInTheDocument();
+  });
+
+  it("explains an inconclusive report and shows the missing evidence", () => {
+    const inconclusiveReport: InvestigationReport = {
+      ...report,
+      summary: "The available evidence does not support a root-cause conclusion.",
+      timeline: [],
+      ranked_hypotheses: [],
+      confirmed_facts: [],
+      recommended_actions: [],
+      uncertainties: ["Collect logs, metrics, and traces for the affected window."],
+    };
+
+    render(
+      <InvestigationWorkspace
+        incident={incident}
+        report={inconclusiveReport}
+        loading={false}
+        onRun={vi.fn()}
+        liveStatus="inconclusive"
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "证据不足，无法判定根因" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Collect logs, metrics, and traces for the affected window."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("所选时间窗内没有可用于因果排序的事件"),
+    ).toBeInTheDocument();
+  });
+
+  it("lets the operator cancel an active live investigation", async () => {
+    const user = userEvent.setup();
+    const cancelLive = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <InvestigationWorkspace
+        incident={incident}
+        report={report}
+        loading
+        onRun={vi.fn()}
+        onCancelLive={cancelLive}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "取消调查" }));
+
+    expect(cancelLive).toHaveBeenCalledOnce();
   });
 });

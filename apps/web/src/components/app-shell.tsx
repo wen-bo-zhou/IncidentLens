@@ -10,6 +10,7 @@ import { InvestigationWorkspace } from "@/components/investigation-workspace";
 import { api } from "@/lib/api";
 import type {
   InvestigationReport,
+  InvestigationWindow,
   RemediationProposal,
   WorkflowEvent,
   WorkflowEventType,
@@ -26,6 +27,7 @@ const streamedEventTypes: WorkflowEventType[] = [
   "run_failed",
   "run_canceled",
 ];
+const terminalStatuses = new Set(["completed", "failed", "canceled", "inconclusive"]);
 
 export function AppShell() {
   const incidentsQuery = useQuery({ queryKey: ["incidents"], queryFn: api.incidents });
@@ -35,14 +37,17 @@ export function AppShell() {
   const [liveEvents, setLiveEvents] = useState<WorkflowEvent[]>([]);
   const [remediations, setRemediations] = useState<RemediationProposal[]>([]);
   const eventSource = useRef<EventSource | null>(null);
+  const liveCredentials = useRef<
+    { investigationId: string; runnerToken: string } | undefined
+  >(undefined);
   const selectedId = chosenId ?? incidentsQuery.data?.[0]?.id;
+  const incident = incidentsQuery.data?.find((item) => item.id === selectedId);
 
   const reportQuery = useQuery({
     queryKey: ["replay", selectedId],
     queryFn: () => api.replay(selectedId!),
-    enabled: Boolean(selectedId),
+    enabled: Boolean(selectedId && incident?.replay_available),
   });
-  const incident = incidentsQuery.data?.find((item) => item.id === selectedId);
   const liveRunning = Boolean(
     liveStatus && !["completed", "failed", "canceled", "inconclusive", "report pending"].includes(liveStatus),
   );
@@ -55,21 +60,30 @@ export function AppShell() {
     setLiveStatus(undefined);
     setLiveEvents([]);
     setRemediations([]);
+    liveCredentials.current = undefined;
     setChosenId(caseId);
   }
 
   async function loadCompletedReport(investigationId: string): Promise<void> {
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      const detail = await api.investigation(investigationId);
+      let detail;
+      try {
+        detail = await api.investigation(investigationId);
+      } catch {
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+        continue;
+      }
       if (detail.report) {
         setLiveReport(detail.report);
         setRemediations(detail.remediation_proposals);
-        setLiveStatus("completed");
+        setLiveStatus(detail.status);
+        liveCredentials.current = undefined;
         eventSource.current?.close();
         return;
       }
-      if (["failed", "canceled", "inconclusive"].includes(detail.status)) {
+      if (terminalStatuses.has(detail.status)) {
         setLiveStatus(detail.status);
+        liveCredentials.current = undefined;
         eventSource.current?.close();
         return;
       }
@@ -78,7 +92,10 @@ export function AppShell() {
     setLiveStatus("report pending");
   }
 
-  async function runLive(runnerToken: string): Promise<void> {
+  async function runLive(
+    runnerToken: string,
+    window: InvestigationWindow,
+  ): Promise<void> {
     if (!selectedId) return;
     eventSource.current?.close();
     setLiveReport(undefined);
@@ -86,8 +103,13 @@ export function AppShell() {
     setRemediations([]);
     setLiveStatus("queued");
     const key = `${selectedId}-${crypto.randomUUID()}`;
-    const created = await api.createInvestigation(selectedId, runnerToken, key);
+    const created = await api.createInvestigation(selectedId, runnerToken, key, window);
+    liveCredentials.current = {
+      investigationId: created.investigation_id,
+      runnerToken,
+    };
     const stream = new EventSource(api.eventsUrl(created.investigation_id));
+    let fallbackStarted = false;
     eventSource.current = stream;
 
     for (const eventType of streamedEventTypes) {
@@ -102,11 +124,29 @@ export function AppShell() {
         if (event.type === "report_ready") void loadCompletedReport(created.investigation_id);
         if (event.type === "run_failed" || event.type === "run_canceled") {
           setLiveStatus(event.type === "run_failed" ? "failed" : "canceled");
+          liveCredentials.current = undefined;
           stream.close();
         }
       });
     }
-    stream.onerror = () => setLiveStatus((current) => current === "completed" ? current : "SSE reconnecting");
+    stream.onerror = () => {
+      setLiveStatus((current) =>
+        current && terminalStatuses.has(current) ? current : "SSE reconnecting",
+      );
+      if (!fallbackStarted) {
+        fallbackStarted = true;
+        void loadCompletedReport(created.investigation_id);
+      }
+    };
+  }
+
+  async function cancelLive(): Promise<void> {
+    const active = liveCredentials.current;
+    if (!active) return;
+    await api.cancelInvestigation(active.investigationId, active.runnerToken);
+    liveCredentials.current = undefined;
+    eventSource.current?.close();
+    setLiveStatus("canceled");
   }
 
   async function approveRemediation(proposalId: string, adminToken: string): Promise<void> {
@@ -118,6 +158,12 @@ export function AppShell() {
         proposal.id === proposalId ? { ...proposal, status: result.status } : proposal,
       ),
     );
+  }
+
+  async function importIncident(file: File, adminToken: string): Promise<void> {
+    const imported = await api.importIncident(file, adminToken);
+    await incidentsQuery.refetch();
+    selectIncident(imported.id);
   }
 
   return (
@@ -140,6 +186,7 @@ export function AppShell() {
           selectedId={selectedId}
           onSelect={selectIncident}
           loading={incidentsQuery.isLoading}
+          onImportIncident={importIncident}
         />
         {incidentsQuery.error ? (
           <main className="connection-error">
@@ -161,6 +208,7 @@ export function AppShell() {
               void reportQuery.refetch();
             }}
             onRunLive={runLive}
+            onCancelLive={liveRunning ? cancelLive : undefined}
             liveStatus={liveStatus}
             liveEventCount={liveEvents.length}
             remediationProposals={remediations}

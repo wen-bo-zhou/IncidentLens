@@ -42,6 +42,19 @@ def test_public_case_does_not_expose_ground_truth() -> None:
             lambda value: value["ground_truth"]["required_evidence_ids"].append("missing:id"),
             "unknown evidence",
         ),
+        (
+            lambda value: value.update(
+                starts_at=value["starts_at"].replace("Z", ""),
+                ends_at=value["ends_at"].replace("Z", ""),
+            ),
+            "timezone",
+        ),
+        (
+            lambda value: value["evidence"][0].update(
+                timestamp=value["evidence"][0]["timestamp"].replace("Z", "")
+            ),
+            "timezone",
+        ),
     ],
 )
 def test_incident_contract_rejects_tampered_packages(mutation: object, message: str) -> None:

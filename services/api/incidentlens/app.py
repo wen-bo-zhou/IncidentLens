@@ -20,7 +20,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
@@ -40,6 +40,19 @@ class InvestigationCreate(BaseModel):
     mode: Literal["live", "replay"] = "live"
     start_at: datetime | None = None
     end_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_time_window(self) -> InvestigationCreate:
+        for value in (self.start_at, self.end_at):
+            if value is not None and value.utcoffset() is None:
+                raise ValueError("Investigation time window must include a timezone")
+        if (
+            self.start_at is not None
+            and self.end_at is not None
+            and self.start_at >= self.end_at
+        ):
+            raise ValueError("Investigation start_at must be earlier than end_at")
+        return self
 
 
 def create_app(*, testing: bool = False) -> FastAPI:
@@ -108,12 +121,18 @@ def create_app(*, testing: bool = False) -> FastAPI:
 
     @app.get("/api/v1/incidents")
     def list_incidents() -> list[dict[str, object]]:
-        return [case.to_public().model_dump(mode="json") for case in repository.list_cases()]
+        return [
+            case.to_public(replay_available=case.id in replay_cache).model_dump(mode="json")
+            for case in repository.list_cases()
+        ]
 
     @app.get("/api/v1/incidents/{case_id}")
     def get_incident(case_id: str) -> dict[str, object]:
         try:
-            return repository.get_case(case_id).to_public().model_dump(mode="json")
+            case = repository.get_case(case_id)
+            return case.to_public(
+                replay_available=case.id in replay_cache
+            ).model_dump(mode="json")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -157,9 +176,43 @@ def create_app(*, testing: bool = False) -> FastAPI:
             case = repository.get_case(payload.incident_case_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        window_start = payload.start_at or case.starts_at
+        window_end = payload.end_at or case.ends_at
+        if window_start >= window_end:
+            raise HTTPException(
+                status_code=422,
+                detail="Investigation start_at must be earlier than end_at",
+            )
+        case = case.model_copy(
+            update={
+                "starts_at": window_start,
+                "ends_at": window_end,
+                "evidence": [
+                    item
+                    for item in case.evidence
+                    if item.timestamp is None
+                    or window_start <= item.timestamp <= window_end
+                ],
+            }
+        )
+        request_fingerprint = sha256(
+            json.dumps(
+                {
+                    "incident_case_id": case.id,
+                    "mode": payload.mode,
+                    "start_at": window_start.isoformat(),
+                    "end_at": window_end.isoformat(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         try:
             record, created = store.create_idempotent(
-                case.id, payload.mode, idempotency_key=idempotency_key
+                case.id,
+                payload.mode,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

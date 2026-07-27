@@ -58,6 +58,7 @@ class PublicIncidentCase(BaseModel):
     ends_at: datetime
     services: list[str]
     evidence_count: int
+    replay_available: bool = False
     severity: Literal["SEV-1", "SEV-2", "SEV-3"] = "SEV-2"
 
 
@@ -73,11 +74,18 @@ class IncidentCase(BaseModel):
     ends_at: datetime
     services: list[str]
     evidence: list[EvidenceRef]
-    ground_truth: GroundTruth
+    ground_truth: GroundTruth | None = None
     severity: Literal["SEV-1", "SEV-2", "SEV-3"] = "SEV-2"
 
     @model_validator(mode="after")
     def validate_incident_contract(self) -> IncidentCase:
+        if self.starts_at.utcoffset() is None or self.ends_at.utcoffset() is None:
+            raise ValueError("Incident timestamps must include a timezone")
+        if any(
+            item.timestamp is not None and item.timestamp.utcoffset() is None
+            for item in self.evidence
+        ):
+            raise ValueError("Evidence timestamps must include a timezone")
         if self.starts_at >= self.ends_at:
             raise ValueError("Incident starts_at must be earlier than ends_at")
         evidence_ids = [item.id for item in self.evidence]
@@ -90,15 +98,18 @@ class IncidentCase(BaseModel):
             if item.timestamp and not self.starts_at <= item.timestamp <= self.ends_at:
                 raise ValueError(f"Evidence timestamp is outside incident range: {item.id}")
         valid_ids = set(evidence_ids)
-        referenced_ids = {
-            *self.ground_truth.required_evidence_ids,
-            *self.ground_truth.distractor_evidence_ids,
-        }
-        if unknown := referenced_ids - valid_ids:
-            raise ValueError(f"Ground truth references unknown evidence: {sorted(unknown)}")
+        if self.ground_truth is not None:
+            referenced_ids = {
+                *self.ground_truth.required_evidence_ids,
+                *self.ground_truth.distractor_evidence_ids,
+            }
+            if unknown := referenced_ids - valid_ids:
+                raise ValueError(
+                    f"Ground truth references unknown evidence: {sorted(unknown)}"
+                )
         return self
 
-    def to_public(self) -> PublicIncidentCase:
+    def to_public(self, *, replay_available: bool = False) -> PublicIncidentCase:
         return PublicIncidentCase(
             id=self.id,
             title=self.title,
@@ -109,6 +120,7 @@ class IncidentCase(BaseModel):
             ends_at=self.ends_at,
             services=self.services,
             evidence_count=len(self.evidence),
+            replay_available=replay_available,
             severity=self.severity,
         )
 

@@ -1,3 +1,5 @@
+from hashlib import sha256
+
 from incidentlens.model_client import ModelNarrative, ModelResponse, ModelUsageCost
 from incidentlens.scenarios import ScenarioRepository
 from incidentlens.workflow import InvestigationEngine
@@ -44,6 +46,29 @@ def test_engine_returns_inconclusive_when_evidence_is_insufficient() -> None:
 
     assert result.status == "inconclusive"
     assert result.report.ranked_hypotheses == []
+
+
+def test_engine_does_not_claim_a_root_cause_without_supporting_evidence() -> None:
+    case = ScenarioRepository.seeded().get_case("deploy-timeout-showcase")
+    excerpt = "Service returned an unfamiliar protocol error."
+    evidence = case.evidence[0].model_copy(
+        update={
+            "excerpt": excerpt,
+            "content_hash": sha256(excerpt.encode()).hexdigest(),
+            "attributes": {},
+        }
+    )
+    case = case.model_copy(update={"evidence": [evidence]})
+
+    result = InvestigationEngine().run(case, investigation_id="inv-unknown")
+
+    assert result.status == "inconclusive"
+    assert result.report.ranked_hypotheses == []
+    assert result.report.confirmed_facts == []
+    assert result.report.recommended_actions == []
+    assert result.report.evidence_index == [evidence]
+    assert result.events[-1].type == "report_ready"
+    assert result.events[-1].payload["status"] == "inconclusive"
 
 
 def test_engine_uses_configured_model_for_auditable_narrative() -> None:

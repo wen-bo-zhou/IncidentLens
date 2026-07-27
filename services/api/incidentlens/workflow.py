@@ -102,6 +102,29 @@ class InvestigationEngine:
 
         root_category = self._infer_root_category(case)
         supporting = self._supporting_evidence(case, root_category)
+        if root_category == "unknown" or not supporting:
+            state_machine.transition("inconclusive")
+            report = InvestigationReport(
+                investigation_id=investigation_id,
+                summary="现有证据不足以形成可支持的根因假设。",
+                timeline=[],
+                ranked_hypotheses=[],
+                confirmed_facts=[],
+                uncertainties=["需要补充能够建立因果链的日志、指标或 Trace 证据。"],
+                recommended_actions=[],
+                evidence_index=case.evidence,
+                model_usage=ModelUsage(tool_calls=tool_call_count),
+                total_cost_cny=0,
+                total_latency_ms=int((perf_counter() - started) * 1000),
+            )
+            log.add(
+                "report_ready",
+                "reporting",
+                "证据不足，调查结论不确定",
+                investigation_id=investigation_id,
+                status="inconclusive",
+            )
+            return WorkflowResult(status="inconclusive", report=report, events=log.events)
         required_count = max(len(supporting), 1)
         signal_kinds = {item.kind for item in case.evidence if item.id in supporting}
         score = score_hypothesis(

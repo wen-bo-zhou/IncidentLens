@@ -10,6 +10,7 @@ export interface IncidentCase {
   ends_at: string;
   services: string[];
   evidence_count: number;
+  replay_available: boolean;
   severity: "SEV-1" | "SEV-2" | "SEV-3";
 }
 
@@ -127,4 +128,9 @@ export interface InvestigationDetail {
   status: string;
   report: InvestigationReport | null;
   remediation_proposals: RemediationProposal[];
+}
+
+export interface InvestigationWindow {
+  startAt: string;
+  endAt: string;
 }

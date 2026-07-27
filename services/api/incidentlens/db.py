@@ -45,6 +45,7 @@ class InvestigationRecord(Base):
     idempotency_key: Mapped[str | None] = mapped_column(
         String(128), nullable=True, unique=True, index=True
     )
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     report: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -139,10 +140,18 @@ class InvestigationStore:
         self.session_factory = session_factory
 
     def create(
-        self, case_id: str, mode: str, *, idempotency_key: str | None = None
+        self,
+        case_id: str,
+        mode: str,
+        *,
+        idempotency_key: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> InvestigationRecord:
         record, _created = self.create_idempotent(
-            case_id, mode, idempotency_key=idempotency_key
+            case_id,
+            mode,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
         )
         return record
 
@@ -233,7 +242,12 @@ class InvestigationStore:
             session.execute(select(1))
 
     def create_idempotent(
-        self, case_id: str, mode: str, *, idempotency_key: str | None
+        self,
+        case_id: str,
+        mode: str,
+        *,
+        idempotency_key: str | None,
+        request_fingerprint: str | None = None,
     ) -> tuple[InvestigationRecord, bool]:
         now = datetime.now(UTC)
         with self.session_factory() as session:
@@ -244,7 +258,9 @@ class InvestigationStore:
                     )
                 )
                 if existing is not None:
-                    if existing.case_id != case_id or existing.mode != mode:
+                    if self._idempotency_conflicts(
+                        existing, case_id, mode, request_fingerprint
+                    ):
                         raise ValueError("Idempotency key was already used for another request")
                     return existing, False
             record = InvestigationRecord(
@@ -252,6 +268,7 @@ class InvestigationStore:
                 case_id=case_id,
                 mode=mode,
                 idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
                 status="queued",
                 report=None,
                 created_at=now,
@@ -271,12 +288,28 @@ class InvestigationStore:
                 )
                 if existing is None:
                     raise
-                if existing.case_id != case_id or existing.mode != mode:
+                if self._idempotency_conflicts(
+                    existing, case_id, mode, request_fingerprint
+                ):
                     raise ValueError(
                         "Idempotency key was already used for another request"
                     ) from None
                 return existing, False
             return record, True
+
+    @staticmethod
+    def _idempotency_conflicts(
+        existing: InvestigationRecord,
+        case_id: str,
+        mode: str,
+        request_fingerprint: str | None,
+    ) -> bool:
+        if existing.case_id != case_id or existing.mode != mode:
+            return True
+        return (
+            existing.request_fingerprint is not None
+            and existing.request_fingerprint != request_fingerprint
+        )
 
     def append_event(self, investigation_id: str, event: WorkflowEvent) -> None:
         status_by_event = {
@@ -285,9 +318,15 @@ class InvestigationStore:
             "run_canceled": "canceled",
         }
         with self.session_factory() as session:
-            record = session.get(InvestigationRecord, investigation_id)
+            record = session.scalar(
+                select(InvestigationRecord)
+                .where(InvestigationRecord.id == investigation_id)
+                .with_for_update()
+            )
             if record is None:
                 raise KeyError(investigation_id)
+            if record.status == "canceled":
+                return
             exists = session.scalar(
                 select(EventRecord.id).where(
                     EventRecord.investigation_id == investigation_id,
@@ -327,7 +366,11 @@ class InvestigationStore:
 
     def save_result(self, investigation_id: str, result: WorkflowResult) -> None:
         with self.session_factory() as session:
-            record = session.get(InvestigationRecord, investigation_id)
+            record = session.scalar(
+                select(InvestigationRecord)
+                .where(InvestigationRecord.id == investigation_id)
+                .with_for_update()
+            )
             if record is None:
                 raise KeyError(investigation_id)
             if record.status == "canceled":
@@ -429,8 +472,21 @@ class InvestigationStore:
 
     def cancel(self, investigation_id: str) -> bool:
         with self.session_factory() as session:
-            record = session.get(InvestigationRecord, investigation_id)
-            if record is None or record.status not in {"queued", "collecting"}:
+            record = session.scalar(
+                select(InvestigationRecord)
+                .where(InvestigationRecord.id == investigation_id)
+                .with_for_update()
+            )
+            active_statuses = {
+                "queued",
+                "collecting",
+                "timeline_building",
+                "hypothesizing",
+                "verifying",
+                "ranking",
+                "reporting",
+            }
+            if record is None or record.status not in active_statuses:
                 return False
             record.status = "canceled"
             record.updated_at = datetime.now(UTC)

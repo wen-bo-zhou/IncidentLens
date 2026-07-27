@@ -13,6 +13,7 @@ import {
   Radio,
   RotateCcw,
   ShieldCheck,
+  Square,
   TimerReset,
   X,
 } from "lucide-react";
@@ -23,6 +24,7 @@ import type {
   EvidenceRef,
   IncidentCase,
   InvestigationReport,
+  InvestigationWindow,
   RemediationProposal,
 } from "@/lib/types";
 
@@ -31,7 +33,8 @@ interface InvestigationWorkspaceProps {
   report?: InvestigationReport;
   loading: boolean;
   onRun: () => void;
-  onRunLive?: (runnerToken: string) => Promise<void>;
+  onRunLive?: (runnerToken: string, window: InvestigationWindow) => Promise<void>;
+  onCancelLive?: () => Promise<void>;
   liveStatus?: string;
   liveEventCount?: number;
   remediationProposals?: RemediationProposal[];
@@ -88,13 +91,21 @@ function EvidenceDialog({ evidence, onClose }: { evidence: EvidenceRef; onClose:
 }
 
 function LiveRunDialog({
+  incident,
   onClose,
   onRun,
 }: {
+  incident: IncidentCase;
   onClose: () => void;
-  onRun: (runnerToken: string) => Promise<void>;
+  onRun: (runnerToken: string, window: InvestigationWindow) => Promise<void>;
 }) {
   const [token, setToken] = useState("");
+  const [startAt, setStartAt] = useState(
+    new Date(incident.starts_at).toISOString().slice(0, 16),
+  );
+  const [endAt, setEndAt] = useState(
+    new Date(incident.ends_at).toISOString().slice(0, 16),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -103,7 +114,15 @@ function LiveRunDialog({
     setSubmitting(true);
     setError(undefined);
     try {
-      await onRun(token);
+      const start = new Date(`${startAt}:00Z`);
+      const end = new Date(`${endAt}:00Z`);
+      if (start >= end) {
+        throw new Error("开始时间必须早于结束时间");
+      }
+      await onRun(token, {
+        startAt: start.toISOString().replace(".000Z", "Z"),
+        endAt: end.toISOString().replace(".000Z", "Z"),
+      });
       onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法启动实时调查");
@@ -133,6 +152,28 @@ function LiveRunDialog({
           placeholder="runner-demo-token"
           autoFocus
         />
+        <div className="time-window-fields">
+          <div>
+            <label htmlFor="investigation-start">开始时间（UTC）</label>
+            <input
+              id="investigation-start"
+              type="datetime-local"
+              value={startAt}
+              onChange={(event) => setStartAt(event.target.value)}
+              required
+            />
+          </div>
+          <div>
+            <label htmlFor="investigation-end">结束时间（UTC）</label>
+            <input
+              id="investigation-end"
+              type="datetime-local"
+              value={endAt}
+              onChange={(event) => setEndAt(event.target.value)}
+              required
+            />
+          </div>
+        </div>
         {error && <p className="form-error">{error}</p>}
         <button className="run-button" disabled={!token || submitting}>
           {submitting ? "正在排队" : "确认启动"}
@@ -200,6 +241,7 @@ export function InvestigationWorkspace({
   loading,
   onRun,
   onRunLive,
+  onCancelLive,
   liveStatus,
   liveEventCount = 0,
   remediationProposals = [],
@@ -275,6 +317,15 @@ export function InvestigationWorkspace({
                 <Radio size={17} />实时调查
               </button>
             )}
+            {onCancelLive && (
+              <button
+                className="replay-button cancel-button"
+                onClick={() => void onCancelLive()}
+                aria-label="取消调查"
+              >
+                <Square size={14} />取消调查
+              </button>
+            )}
           </div>
         </div>
       </section>
@@ -303,6 +354,13 @@ export function InvestigationWorkspace({
               <span className="evidence-total">{report.timeline.length} 个关键节点</span>
             </header>
             <div className="causal-spine">
+              {report.timeline.length === 0 && (
+                <div className="timeline-empty">
+                  <FileSearch size={24} />
+                  <strong>所选时间窗内没有可用于因果排序的事件</strong>
+                  <span>调整调查时间窗，或导入包含时间戳的日志、指标和 Trace。</span>
+                </div>
+              )}
               {report.timeline.map((item, index) => (
                 <article className="timeline-node" key={`${item.timestamp}-${index}`}>
                   <div className="time-cell"><strong>{formatClock(item.timestamp)}</strong><small>UTC</small></div>
@@ -339,6 +397,21 @@ export function InvestigationWorkspace({
                 </ol>
               </section>
             )}
+            {!top && (
+              <section className="inconclusive-verdict">
+                <span className="status-line">Inconclusive</span>
+                <h3>证据不足，无法判定根因</h3>
+                <p>{report.summary}</p>
+                {report.uncertainties.length > 0 && (
+                  <>
+                    <strong>继续调查需要</strong>
+                    <ul>
+                      {report.uncertainties.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </>
+                )}
+              </section>
+            )}
 
             {report.ranked_hypotheses.length > 1 && (
               <section className="hypothesis-compare">
@@ -358,10 +431,12 @@ export function InvestigationWorkspace({
               </section>
             )}
 
-            <section className="fact-box">
-              <h3><CheckCircle2 size={16} /> 已确认事实</h3>
-              <ul>{report.confirmed_facts.slice(0, 3).map((fact) => <li key={fact}>{fact}</li>)}</ul>
-            </section>
+            {report.confirmed_facts.length > 0 && (
+              <section className="fact-box">
+                <h3><CheckCircle2 size={16} /> 已确认事实</h3>
+                <ul>{report.confirmed_facts.slice(0, 3).map((fact) => <li key={fact}>{fact}</li>)}</ul>
+              </section>
+            )}
 
             {report.recommended_actions.map((action) => {
               const proposal = remediationProposals.find(
@@ -396,7 +471,11 @@ export function InvestigationWorkspace({
 
       {selectedEvidence && <EvidenceDialog evidence={selectedEvidence} onClose={() => setSelectedEvidenceId(null)} />}
       {showLiveDialog && onRunLive && (
-        <LiveRunDialog onClose={() => setShowLiveDialog(false)} onRun={onRunLive} />
+        <LiveRunDialog
+          incident={incident}
+          onClose={() => setShowLiveDialog(false)}
+          onRun={onRunLive}
+        />
       )}
       {approvalProposal && onApproveRemediation && (
         <ApprovalDialog

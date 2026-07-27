@@ -18,6 +18,16 @@ def test_guest_can_list_showcase_cases_but_not_hidden_truth() -> None:
     payload = response.json()
     assert len(payload) == 3
     assert all("ground_truth" not in item for item in payload)
+    assert all(item["replay_available"] is True for item in payload)
+
+
+def test_versioned_openapi_schema_is_available() -> None:
+    client = TestClient(create_app(testing=True))
+
+    response = client.get("/api/v1/openapi.json")
+
+    assert response.status_code == 200
+    assert response.json()["info"]["title"] == "IncidentLens API"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -39,6 +49,47 @@ def test_runner_can_create_and_read_inline_investigation() -> None:
     )
 
 
+def test_investigation_time_window_limits_the_evidence_used() -> None:
+    client = TestClient(create_app(testing=True))
+
+    created = client.post(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer runner-demo-token"},
+        json={
+            "incident_case_id": "deploy-timeout-showcase",
+            "mode": "live",
+            "start_at": "2026-01-10T09:06:30Z",
+            "end_at": "2026-01-10T09:07:30Z",
+        },
+    )
+
+    assert created.status_code == 202
+    detail = client.get(
+        f"/api/v1/investigations/{created.json()['investigation_id']}"
+    ).json()
+    assert detail["status"] == "inconclusive"
+    assert [item["id"] for item in detail["report"]["evidence_index"]] == [
+        "deploy-timeout-showcase:noise"
+    ]
+
+
+def test_investigation_rejects_an_invalid_time_window() -> None:
+    client = TestClient(create_app(testing=True))
+
+    response = client.post(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer runner-demo-token"},
+        json={
+            "incident_case_id": "deploy-timeout-showcase",
+            "mode": "live",
+            "start_at": "2026-01-10T09:10:00Z",
+            "end_at": "2026-01-10T09:05:00Z",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_idempotency_key_returns_the_original_investigation() -> None:
     client = TestClient(create_app(testing=True))
     headers = {
@@ -56,6 +107,39 @@ def test_idempotency_key_returns_the_original_investigation() -> None:
     assert second.json()["idempotent_replay"] is True
 
 
+def test_idempotency_key_rejects_a_different_time_window() -> None:
+    client = TestClient(create_app(testing=True))
+    headers = {
+        "Authorization": "Bearer runner-demo-token",
+        "Idempotency-Key": "windowed-incident-20260727",
+    }
+
+    first = client.post(
+        "/api/v1/investigations",
+        headers=headers,
+        json={
+            "incident_case_id": "deploy-timeout-showcase",
+            "mode": "live",
+            "start_at": "2026-01-10T09:00:00Z",
+            "end_at": "2026-01-10T09:30:00Z",
+        },
+    )
+    second = client.post(
+        "/api/v1/investigations",
+        headers=headers,
+        json={
+            "incident_case_id": "deploy-timeout-showcase",
+            "mode": "live",
+            "start_at": "2026-01-10T09:30:00Z",
+            "end_at": "2026-01-10T10:00:00Z",
+        },
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert "another request" in second.json()["detail"]
+
+
 def test_guest_cannot_trigger_live_investigation() -> None:
     client = TestClient(create_app(testing=True))
 
@@ -65,6 +149,37 @@ def test_guest_cannot_trigger_live_investigation() -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_runner_daily_live_run_quota_is_enforced() -> None:
+    client = TestClient(create_app(testing=True))
+    payload = {"incident_case_id": "deploy-timeout-showcase", "mode": "live"}
+    headers = {"Authorization": "Bearer runner-demo-token"}
+
+    accepted = [
+        client.post("/api/v1/investigations", headers=headers, json=payload)
+        for _ in range(10)
+    ]
+    exhausted = client.post("/api/v1/investigations", headers=headers, json=payload)
+
+    assert all(response.status_code == 202 for response in accepted)
+    assert exhausted.status_code == 429
+    assert exhausted.json()["detail"] == "Daily live-run quota exhausted"
+
+
+def test_only_runner_or_admin_can_cancel_an_active_investigation() -> None:
+    client = TestClient(create_app(testing=True))
+    record = client.app.state.store.create("cancel-api-case", "live")
+
+    forbidden = client.post(f"/api/v1/investigations/{record.id}/cancel")
+    canceled = client.post(
+        f"/api/v1/investigations/{record.id}/cancel",
+        headers={"Authorization": "Bearer runner-demo-token"},
+    )
+
+    assert forbidden.status_code == 403
+    assert canceled.status_code == 202
+    assert canceled.json()["status"] == "canceled"
 
 
 def test_public_replay_is_precomputed_and_stable() -> None:
@@ -197,6 +312,7 @@ def test_admin_can_import_valid_incident_pack() -> None:
 
     assert response.status_code == 201
     assert response.json()["id"] == "customer-imported-showcase"
+    assert response.json()["replay_available"] is False
     detail = client.get("/api/v1/incidents/customer-imported-showcase")
     assert detail.status_code == 200
     assert "ground_truth" not in detail.json()
@@ -205,6 +321,49 @@ def test_admin_can_import_valid_incident_pack() -> None:
     assert client.app.state.store.audit_actions("customer-imported-showcase") == [
         "incident.imported"
     ]
+
+
+def test_admin_can_import_and_investigate_an_unlabeled_incident_pack() -> None:
+    client = TestClient(create_app(testing=True))
+    source = ScenarioRepository.seeded().get_case("db-pool-showcase")
+    payload = source.model_dump(mode="json")
+    payload["id"] = "customer-unlabeled-incident"
+    payload["title"] = "未标注的客户事故"
+    payload.pop("ground_truth")
+
+    imported = client.post(
+        "/api/v1/incidents/import",
+        headers={"Authorization": "Bearer admin-demo-token"},
+        files={
+            "file": (
+                "customer-incident.json",
+                json.dumps(payload, ensure_ascii=False).encode(),
+                "application/json",
+            )
+        },
+    )
+
+    assert imported.status_code == 201
+    created = client.post(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer runner-demo-token"},
+        json={"incident_case_id": payload["id"], "mode": "live"},
+    )
+    assert created.status_code == 202
+    detail = client.get(
+        f"/api/v1/investigations/{created.json()['investigation_id']}"
+    ).json()
+    assert detail["status"] == "completed"
+    assert detail["report"]["ranked_hypotheses"][0]["root_cause_category"] == (
+        "db_pool_exhaustion"
+    )
+
+    evaluation = client.post(
+        "/api/v1/eval-runs",
+        headers={"Authorization": "Bearer admin-demo-token"},
+    )
+    assert evaluation.status_code == 200
+    assert evaluation.json()["case_count"] == 15
 
 
 def test_import_rejects_non_json_and_non_admin() -> None:
