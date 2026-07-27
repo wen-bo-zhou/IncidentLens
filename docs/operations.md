@@ -16,12 +16,21 @@ investigation and audit ledgers. The browser keeps the token in component memory
 only; refreshing or leaving the page clears it.
 
 - Investigation history: `GET /api/v1/investigations` (runner or admin)
+- Investigation detail: `GET /api/v1/investigations/{id}` (runner or admin)
+- Stream ticket: `POST /api/v1/investigations/{id}/stream-ticket` (runner or admin)
+- Event stream: `GET /api/v1/investigations/{id}/events?ticket=...`
 - Audit history: `GET /api/v1/audit-events` (admin only)
 - Both endpoints accept `limit` and `offset`; investigations also accept
   `status` and `case_id`, while audit events accept `action` and `resource_id`.
 
 Runner live-run usage is stored in `daily_run_usage`, keyed by UTC date and a
 one-way token digest. Restarting the API does not reset the daily limit.
+
+Stream tickets live for five minutes and are scoped to one investigation.
+`investigation_stream_tickets` stores only their SHA-256 digests. Ticket
+issuance is recorded as `investigation.stream_ticket_issued` without the raw
+value. The API redacts the `ticket` query parameter from Uvicorn access logs;
+configure any additional public reverse-proxy logs to do the same.
 
 ## Database lifecycle
 
@@ -45,7 +54,7 @@ docker compose run --rm api alembic downgrade base
 
 ## Recovery behavior
 
-Celery uses late acknowledgements and rejects tasks when a Worker is lost. A replacement Worker replays the deterministic stages; event sequence uniqueness and idempotent report/remediation writes prevent duplicates. Clients reconnect to the SSE endpoint with `Last-Event-ID` and receive only later events.
+Celery uses late acknowledgements and rejects tasks when a Worker is lost. A replacement Worker replays the deterministic stages; event sequence uniqueness and idempotent report/remediation writes prevent duplicates. Clients reconnect to the SSE endpoint with `Last-Event-ID` and receive only later events while the scoped stream ticket is valid; the web client uses authenticated report polling if reconnection fails.
 
 ## Load check
 

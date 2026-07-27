@@ -18,6 +18,7 @@ vi.mock("@/lib/api", () => ({
     replay: vi.fn(),
     createInvestigation: vi.fn(),
     investigation: vi.fn(),
+    streamTicket: vi.fn(),
     cancelInvestigation: vi.fn(),
     approveRemediation: vi.fn(),
     eventsUrl: vi.fn(),
@@ -133,6 +134,10 @@ describe("AppShell", () => {
       mode: "live",
       idempotent_replay: false,
     });
+    mockedApi.streamTicket.mockResolvedValue({
+      ticket: "stream-ticket",
+      expires_at: "2026-07-27T12:05:00Z",
+    });
     mockedApi.eventsUrl.mockReturnValue("/api/v1/investigations/inv-1/events");
   });
 
@@ -153,6 +158,8 @@ describe("AppShell", () => {
     await user.type(screen.getByLabelText("Runner 令牌"), "runner-token");
     await user.click(screen.getByRole("button", { name: "确认启动" }));
     await waitFor(() => expect(FakeEventSource.latest).toBeDefined());
+    expect(mockedApi.streamTicket).toHaveBeenCalledWith("inv-1", "runner-token");
+    expect(mockedApi.eventsUrl).toHaveBeenCalledWith("inv-1", "stream-ticket");
 
     act(() => FakeEventSource.latest?.fail());
 
@@ -160,6 +167,7 @@ describe("AppShell", () => {
       await screen.findByRole("heading", { name: "证据不足，无法判定根因" }),
     ).toBeInTheDocument();
     expect(screen.getByText("inconclusive")).toBeInTheDocument();
+    expect(mockedApi.investigation).toHaveBeenCalledWith("inv-1", "runner-token");
   });
 
   it("does not request a replay for an imported live-only incident", async () => {

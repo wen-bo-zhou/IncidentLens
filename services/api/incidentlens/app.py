@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Annotated, Literal
 
@@ -55,6 +55,11 @@ class InvestigationCreate(BaseModel):
         return self
 
 
+class StreamTicket(BaseModel):
+    ticket: str
+    expires_at: datetime
+
+
 def create_app(*, testing: bool = False) -> FastAPI:
     settings = Settings(
         database_url="sqlite://" if testing else get_settings().database_url,
@@ -82,7 +87,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
     }
     app = FastAPI(
         title="IncidentLens API",
-        version="0.2.0",
+        version="0.3.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.add_middleware(
@@ -303,14 +308,51 @@ def create_app(*, testing: bool = False) -> FastAPI:
         )
 
     @app.get("/api/v1/investigations/{investigation_id}")
-    def get_investigation(investigation_id: str) -> dict[str, object]:
+    def get_investigation(
+        investigation_id: str,
+        _role: Role = Depends(runner),
+    ) -> dict[str, object]:
         value = store.get(investigation_id)
         if value is None:
             raise HTTPException(status_code=404, detail="Investigation not found")
         return value
 
+    @app.post(
+        "/api/v1/investigations/{investigation_id}/stream-ticket",
+        response_model=StreamTicket,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def issue_stream_ticket(
+        investigation_id: str,
+        role: Role = Depends(runner),
+    ) -> StreamTicket:
+        expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        try:
+            ticket = store.issue_stream_ticket(
+                investigation_id,
+                expires_at=expires_at,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Investigation not found",
+            ) from exc
+        store.record_audit(
+            actor=role,
+            action="investigation.stream_ticket_issued",
+            resource_id=investigation_id,
+            detail={"expires_at": expires_at.isoformat()},
+        )
+        return StreamTicket(ticket=ticket, expires_at=expires_at)
+
     @app.get("/api/v1/investigations/{investigation_id}/events")
-    def investigation_events(request: Request, investigation_id: str) -> EventSourceResponse:
+    def investigation_events(
+        request: Request,
+        investigation_id: str,
+        ticket: Annotated[str | None, Query(max_length=128)] = None,
+    ) -> EventSourceResponse:
+        if ticket is None or not store.validate_stream_ticket(investigation_id, ticket):
+            raise HTTPException(status_code=403, detail="Invalid or expired stream ticket")
         if store.get(investigation_id) is None:
             raise HTTPException(status_code=404, detail="Investigation not found")
         header = request.headers.get("last-event-id", "0")

@@ -65,6 +65,45 @@ describe("api", () => {
     );
   });
 
+  it("protects investigation detail and issues a scoped stream ticket", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ investigation_id: "inv-1" }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ticket: "ticket with/slash",
+          expires_at: "2026-07-27T12:05:00Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.investigation("inv/1", "runner-token");
+    await api.streamTicket("inv/1", "runner-token");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/investigations/inv%2F1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer runner-token",
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/investigations/inv%2F1/stream-ticket",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer runner-token",
+        }),
+      }),
+    );
+    expect(api.eventsUrl("inv/1", "ticket with/slash")).toBe(
+      "/api/v1/investigations/inv%2F1/events?ticket=ticket+with%2Fslash",
+    );
+  });
+
   it("uploads an incident pack as multipart data without overriding its boundary", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "imported-case" }));
     vi.stubGlobal("fetch", fetchMock);

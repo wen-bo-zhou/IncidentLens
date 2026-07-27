@@ -70,11 +70,14 @@ export function AppShell() {
     setChosenId(caseId);
   }
 
-  async function loadCompletedReport(investigationId: string): Promise<void> {
+  async function loadCompletedReport(
+    investigationId: string,
+    runnerToken: string,
+  ): Promise<void> {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       let detail;
       try {
-        detail = await api.investigation(investigationId);
+        detail = await api.investigation(investigationId, runnerToken);
       } catch {
         await new Promise((resolve) => window.setTimeout(resolve, 200));
         continue;
@@ -114,7 +117,13 @@ export function AppShell() {
       investigationId: created.investigation_id,
       runnerToken,
     };
-    const stream = new EventSource(api.eventsUrl(created.investigation_id));
+    const streamTicket = await api.streamTicket(
+      created.investigation_id,
+      runnerToken,
+    );
+    const stream = new EventSource(
+      api.eventsUrl(created.investigation_id, streamTicket.ticket),
+    );
     let fallbackStarted = false;
     eventSource.current = stream;
 
@@ -127,7 +136,9 @@ export function AppShell() {
         if (event.type === "stage_started" || event.type === "tool_started") {
           setLiveStatus(event.type === "tool_started" ? `${event.stage} · ${event.message}` : event.stage);
         }
-        if (event.type === "report_ready") void loadCompletedReport(created.investigation_id);
+        if (event.type === "report_ready") {
+          void loadCompletedReport(created.investigation_id, runnerToken);
+        }
         if (event.type === "run_failed" || event.type === "run_canceled") {
           setLiveStatus(event.type === "run_failed" ? "failed" : "canceled");
           liveCredentials.current = undefined;
@@ -141,7 +152,7 @@ export function AppShell() {
       );
       if (!fallbackStarted) {
         fallbackStarted = true;
-        void loadCompletedReport(created.investigation_id);
+        void loadCompletedReport(created.investigation_id, runnerToken);
       }
     };
   }

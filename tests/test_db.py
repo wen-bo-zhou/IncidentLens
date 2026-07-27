@@ -1,9 +1,14 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from incidentlens.db import InvestigationStore, create_session_factory
+from incidentlens.db import (
+    InvestigationStore,
+    InvestigationStreamTicketRecord,
+    create_session_factory,
+)
 from incidentlens.schemas import WorkflowEvent
+from sqlalchemy import select
 
 
 def _store(tmp_path: Path) -> InvestigationStore:
@@ -129,3 +134,32 @@ def test_daily_quota_is_durable_across_store_instances(tmp_path: Path) -> None:
     assert second_store.consume_daily_quota("runner-token-hash", today, limit=2) is True
     assert first_store.consume_daily_quota("runner-token-hash", today, limit=2) is False
     assert first_store.consume_daily_quota("different-runner", today, limit=2) is True
+
+
+def test_stream_ticket_is_scoped_hashed_and_expires(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.create("case-a", "live")
+    second = store.create("case-b", "live")
+    issued_at = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
+
+    ticket = store.issue_stream_ticket(
+        first.id,
+        expires_at=issued_at + timedelta(minutes=5),
+    )
+
+    assert store.validate_stream_ticket(first.id, ticket, now=issued_at) is True
+    assert store.validate_stream_ticket(second.id, ticket, now=issued_at) is False
+    assert (
+        store.validate_stream_ticket(
+            first.id,
+            ticket,
+            now=issued_at + timedelta(minutes=5),
+        )
+        is False
+    )
+    with store.session_factory() as session:
+        stored_hash = session.scalar(
+            select(InvestigationStreamTicketRecord.ticket_hash)
+        )
+    assert stored_hash is not None
+    assert stored_hash != ticket

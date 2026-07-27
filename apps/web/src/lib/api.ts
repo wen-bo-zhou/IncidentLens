@@ -7,6 +7,7 @@ import type {
   InvestigationSummary,
   InvestigationWindow,
   Page,
+  StreamTicket,
 } from "@/lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -74,9 +75,18 @@ export const api = {
         end_at: window.endAt,
       }),
     }),
-  investigation: (investigationId: string) =>
+  investigation: (investigationId: string, runnerToken: string) =>
     request<InvestigationDetail>(
       `/api/v1/investigations/${encodeURIComponent(investigationId)}`,
+      { headers: { Authorization: `Bearer ${runnerToken}` } },
+    ),
+  streamTicket: (investigationId: string, runnerToken: string) =>
+    request<StreamTicket>(
+      `/api/v1/investigations/${encodeURIComponent(investigationId)}/stream-ticket`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${runnerToken}` },
+      },
     ),
   cancelInvestigation: (investigationId: string, runnerToken: string) =>
     request<{ status: "canceled" }>(
@@ -98,8 +108,8 @@ export const api = {
         headers: { Authorization: `Bearer ${adminToken}` },
       },
     ),
-  eventsUrl: (investigationId: string) =>
-    `${API_URL}/api/v1/investigations/${encodeURIComponent(investigationId)}/events`,
+  eventsUrl: (investigationId: string, ticket: string) =>
+    `${API_URL}/api/v1/investigations/${encodeURIComponent(investigationId)}/events?${queryString({ ticket })}`,
   evaluation: (adminToken: string) =>
     request<EvaluationSummary>("/api/v1/eval-runs", {
       method: "POST",

@@ -6,6 +6,13 @@ The workflow is `collecting → timeline_building → hypothesizing → verifyin
 
 Public replay is intentionally model-free. Live mode is role-gated, idempotent, limited to ten runs per runner per day, capped at ¥0.20 before a model call, and can be disabled without affecting the portfolio demo. Celery late acknowledgements plus event uniqueness make Worker-loss recovery safe; SSE streams poll durable events and honor `Last-Event-ID`.
 
+Live investigation reports require a runner/admin bearer credential. Because
+native `EventSource` cannot attach an authorization header, the authenticated
+client first requests a five-minute stream ticket. Only its SHA-256 digest,
+investigation ID and expiry are persisted; the raw ticket is returned once and
+is valid only for that investigation. Authenticated polling remains the fallback
+when the stream cannot reconnect.
+
 Operational governance is database-backed. Runner identity is represented only
 by a SHA-256 token digest in the daily quota table, and quota consumption uses
 an atomic conditional update so restarts and multiple API workers share the same

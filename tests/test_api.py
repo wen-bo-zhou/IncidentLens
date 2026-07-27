@@ -1,12 +1,25 @@
 import json
+import logging
 from datetime import UTC, datetime
 from threading import Thread
 from time import sleep
 
 from fastapi.testclient import TestClient
 from incidentlens.app import create_app
+from incidentlens.observability import redact_access_log_path
 from incidentlens.scenarios import ScenarioRepository
 from incidentlens.schemas import WorkflowEvent
+
+RUNNER_HEADERS = {"Authorization": "Bearer runner-demo-token"}
+
+
+def _stream_ticket(client: TestClient, investigation_id: str) -> str:
+    response = client.post(
+        f"/api/v1/investigations/{investigation_id}/stream-ticket",
+        headers=RUNNER_HEADERS,
+    )
+    assert response.status_code == 201
+    return str(response.json()["ticket"])
 
 
 def test_guest_can_list_showcase_cases_but_not_hidden_truth() -> None:
@@ -28,21 +41,27 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.2.0"
+    assert response.json()["info"]["version"] == "0.3.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
     client = TestClient(create_app(testing=True))
+    runner_headers = {"Authorization": "Bearer runner-demo-token"}
 
     created = client.post(
         "/api/v1/investigations",
-        headers={"Authorization": "Bearer runner-demo-token"},
+        headers=runner_headers,
         json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
     )
 
     assert created.status_code == 202
     investigation_id = created.json()["investigation_id"]
-    detail = client.get(f"/api/v1/investigations/{investigation_id}")
+    forbidden = client.get(f"/api/v1/investigations/{investigation_id}")
+    detail = client.get(
+        f"/api/v1/investigations/{investigation_id}",
+        headers=runner_headers,
+    )
+    assert forbidden.status_code == 403
     assert detail.status_code == 200
     assert detail.json()["status"] == "completed"
     assert detail.json()["report"]["ranked_hypotheses"][0]["root_cause_category"] == (
@@ -66,7 +85,8 @@ def test_investigation_time_window_limits_the_evidence_used() -> None:
 
     assert created.status_code == 202
     detail = client.get(
-        f"/api/v1/investigations/{created.json()['investigation_id']}"
+        f"/api/v1/investigations/{created.json()['investigation_id']}",
+        headers=RUNNER_HEADERS,
     ).json()
     assert detail["status"] == "inconclusive"
     assert [item["id"] for item in detail["report"]["evidence_index"]] == [
@@ -209,10 +229,12 @@ def test_sse_replays_ordered_events_and_respects_last_event_id() -> None:
         json={"incident_case_id": "db-pool-showcase", "mode": "live"},
     )
     investigation_id = created.json()["investigation_id"]
+    ticket = _stream_ticket(client, investigation_id)
 
     response = client.get(
         f"/api/v1/investigations/{investigation_id}/events",
         headers={"Last-Event-ID": "2"},
+        params={"ticket": ticket},
     )
 
     assert response.status_code == 200
@@ -225,6 +247,7 @@ def test_sse_waits_for_events_created_after_subscription() -> None:
     app = create_app(testing=True)
     client = TestClient(app)
     record = app.state.store.create("deploy-timeout-showcase", "live")
+    ticket = _stream_ticket(client, record.id)
 
     def finish_later() -> None:
         sleep(0.05)
@@ -242,12 +265,78 @@ def test_sse_waits_for_events_created_after_subscription() -> None:
 
     writer = Thread(target=finish_later)
     writer.start()
-    response = client.get(f"/api/v1/investigations/{record.id}/events")
+    response = client.get(
+        f"/api/v1/investigations/{record.id}/events",
+        params={"ticket": ticket},
+    )
     writer.join()
 
     assert response.status_code == 200
     assert "event: stage_started" in response.text
     assert '"sequence": 1' in response.text
+
+
+def test_sse_requires_an_investigation_scoped_stream_ticket() -> None:
+    client = TestClient(create_app(testing=True))
+    runner_headers = {"Authorization": "Bearer runner-demo-token"}
+    first = client.post(
+        "/api/v1/investigations",
+        headers=runner_headers,
+        json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
+    )
+    second = client.post(
+        "/api/v1/investigations",
+        headers=runner_headers,
+        json={"incident_case_id": "db-pool-showcase", "mode": "live"},
+    )
+    first_id = first.json()["investigation_id"]
+    second_id = second.json()["investigation_id"]
+
+    missing = client.get(f"/api/v1/investigations/{first_id}/events")
+    invalid = client.get(
+        f"/api/v1/investigations/{first_id}/events",
+        params={"ticket": "invalid"},
+    )
+    forbidden_issue = client.post(
+        f"/api/v1/investigations/{first_id}/stream-ticket"
+    )
+    issued = client.post(
+        f"/api/v1/investigations/{first_id}/stream-ticket",
+        headers=runner_headers,
+    )
+
+    assert missing.status_code == 403
+    assert invalid.status_code == 403
+    assert forbidden_issue.status_code == 403
+    assert issued.status_code == 201
+    assert issued.json()["ticket"]
+    assert issued.json()["expires_at"]
+
+    ticket = issued.json()["ticket"]
+    wrong_investigation = client.get(
+        f"/api/v1/investigations/{second_id}/events",
+        params={"ticket": ticket},
+    )
+    allowed = client.get(
+        f"/api/v1/investigations/{first_id}/events",
+        params={"ticket": ticket},
+    )
+
+    assert wrong_investigation.status_code == 403
+    assert allowed.status_code == 200
+    assert "event: report_ready" in allowed.text
+
+    audit = client.get(
+        "/api/v1/audit-events",
+        headers={"Authorization": "Bearer admin-demo-token"},
+        params={
+            "action": "investigation.stream_ticket_issued",
+            "resource_id": first_id,
+        },
+    )
+    assert audit.status_code == 200
+    assert audit.json()["total"] == 1
+    assert ticket not in json.dumps(audit.json())
 
 
 def test_only_admin_can_run_evaluation() -> None:
@@ -275,7 +364,10 @@ def test_admin_can_approve_exactly_one_sandbox_remediation() -> None:
         json={"incident_case_id": "poison-message-showcase", "mode": "live"},
     )
     investigation_id = created.json()["investigation_id"]
-    detail = client.get(f"/api/v1/investigations/{investigation_id}").json()
+    detail = client.get(
+        f"/api/v1/investigations/{investigation_id}",
+        headers=RUNNER_HEADERS,
+    ).json()
     proposal_id = detail["remediation_proposals"][0]["id"]
 
     approved = client.post(
@@ -352,7 +444,8 @@ def test_admin_can_import_and_investigate_an_unlabeled_incident_pack() -> None:
     )
     assert created.status_code == 202
     detail = client.get(
-        f"/api/v1/investigations/{created.json()['investigation_id']}"
+        f"/api/v1/investigations/{created.json()['investigation_id']}",
+        headers=RUNNER_HEADERS,
     ).json()
     assert detail["status"] == "completed"
     assert detail["report"]["ranked_hypotheses"][0]["root_cause_category"] == (
@@ -402,6 +495,36 @@ def test_prometheus_metrics_do_not_capture_request_content() -> None:
     assert "incidentlens_model_tokens_total" in response.text
     assert "incidentlens_investigation_duration_seconds" in response.text
     assert "health/live" not in response.text
+
+
+def test_sse_ticket_is_redacted_from_access_log_paths() -> None:
+    value = redact_access_log_path(
+        "/api/v1/investigations/inv-1/events?ticket=raw-secret&after=2"
+    )
+
+    assert value == (
+        "/api/v1/investigations/inv-1/events?ticket=[REDACTED]&after=2"
+    )
+    create_app(testing=True)
+    record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=(
+            "127.0.0.1",
+            "GET",
+            "/api/v1/investigations/inv-1/events?ticket=raw-secret",
+            "1.1",
+            200,
+        ),
+        exc_info=None,
+    )
+    for log_filter in logging.getLogger("uvicorn.access").filters:
+        log_filter.filter(record)
+
+    assert "raw-secret" not in record.getMessage()
 
 
 def test_runner_can_filter_paginated_investigation_history() -> None:

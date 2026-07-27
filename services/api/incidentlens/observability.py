@@ -1,4 +1,6 @@
+import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import perf_counter
@@ -13,6 +15,34 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 from prometheus_client.exposition import CONTENT_TYPE_LATEST
 
 _tracer_provider: TracerProvider | None = None
+_SENSITIVE_QUERY = re.compile(r"([?&]ticket=)[^&\s]*")
+
+
+def redact_access_log_path(path: str) -> str:
+    return _SENSITIVE_QUERY.sub(r"\1[REDACTED]", path)
+
+
+class _SensitiveQueryFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        arguments = record.args
+        if (
+            record.name == "uvicorn.access"
+            and isinstance(arguments, tuple)
+            and len(arguments) >= 3
+            and isinstance(arguments[2], str)
+        ):
+            record.args = (
+                *arguments[:2],
+                redact_access_log_path(arguments[2]),
+                *arguments[3:],
+            )
+        return True
+
+
+def _configure_access_log_redaction() -> None:
+    logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _SensitiveQueryFilter) for item in logger.filters):
+        logger.addFilter(_SensitiveQueryFilter())
 
 
 def configure_tracer(service_name: str) -> Tracer:
@@ -56,6 +86,7 @@ class TelemetryMetrics:
 
 
 def configure_observability(app: FastAPI) -> TelemetryMetrics:
+    _configure_access_log_redaction()
     registry = CollectorRegistry()
     requests = Counter(
         "incidentlens_http_requests_total",

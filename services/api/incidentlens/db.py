@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from hashlib import sha256
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any, cast
 from uuid import uuid4
 
@@ -15,6 +17,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     create_engine,
+    delete,
     func,
     select,
     update,
@@ -75,6 +78,17 @@ class EventRecord(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     investigation: Mapped[InvestigationRecord] = relationship(back_populates="events")
+
+
+class InvestigationStreamTicketRecord(Base):
+    __tablename__ = "investigation_stream_tickets"
+
+    ticket_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("investigations.id"), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class RemediationRecord(Base):
@@ -337,6 +351,56 @@ class InvestigationStore:
     def ping(self) -> None:
         with self.session_factory() as session:
             session.execute(select(1))
+
+    def issue_stream_ticket(
+        self,
+        investigation_id: str,
+        *,
+        expires_at: datetime,
+    ) -> str:
+        if expires_at.utcoffset() is None:
+            raise ValueError("Stream ticket expiry must include a timezone")
+        now = datetime.now(UTC)
+        ticket = token_urlsafe(32)
+        ticket_hash = sha256(ticket.encode()).hexdigest()
+        with self.session_factory() as session:
+            if session.get(InvestigationRecord, investigation_id) is None:
+                raise KeyError(investigation_id)
+            session.execute(
+                delete(InvestigationStreamTicketRecord).where(
+                    InvestigationStreamTicketRecord.expires_at <= now
+                )
+            )
+            session.add(
+                InvestigationStreamTicketRecord(
+                    ticket_hash=ticket_hash,
+                    investigation_id=investigation_id,
+                    expires_at=expires_at,
+                    created_at=now,
+                )
+            )
+            session.commit()
+        return ticket
+
+    def validate_stream_ticket(
+        self,
+        investigation_id: str,
+        ticket: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        checked_at = now or datetime.now(UTC)
+        if checked_at.utcoffset() is None:
+            raise ValueError("Stream ticket validation time must include a timezone")
+        ticket_hash = sha256(ticket.encode()).hexdigest()
+        with self.session_factory() as session:
+            record = session.get(InvestigationStreamTicketRecord, ticket_hash)
+            if record is None or record.investigation_id != investigation_id:
+                return False
+            expires_at = record.expires_at
+            if expires_at.utcoffset() is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            return expires_at > checked_at
 
     def create_idempotent(
         self,

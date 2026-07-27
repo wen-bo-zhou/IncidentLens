@@ -130,6 +130,11 @@ export interface InvestigationDetail {
   remediation_proposals: RemediationProposal[];
 }
 
+export interface StreamTicket {
+  ticket: string;
+  expires_at: string;
+}
+
 export interface InvestigationWindow {
   startAt: string;
   endAt: string;
