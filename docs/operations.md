@@ -9,6 +9,20 @@
 - Metrics: `GET /metrics`
 - API schema: `GET /api/v1/openapi.json`
 
+## Operations console and governance APIs
+
+Open `/operations` and provide an administrator token to inspect the durable
+investigation and audit ledgers. The browser keeps the token in component memory
+only; refreshing or leaving the page clears it.
+
+- Investigation history: `GET /api/v1/investigations` (runner or admin)
+- Audit history: `GET /api/v1/audit-events` (admin only)
+- Both endpoints accept `limit` and `offset`; investigations also accept
+  `status` and `case_id`, while audit events accept `action` and `resource_id`.
+
+Runner live-run usage is stored in `daily_run_usage`, keyed by UTC date and a
+one-way token digest. Restarting the API does not reset the daily limit.
+
 ## Database lifecycle
 
 The API container runs `alembic upgrade head` before serving traffic. Before an upgrade, create a backup:

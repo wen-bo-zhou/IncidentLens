@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import defaultdict
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Annotated, Literal
 
@@ -14,6 +13,7 @@ from fastapi import (
     File,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -80,11 +80,9 @@ def create_app(*, testing: bool = False) -> FastAPI:
         ).report.model_dump(mode="json")
         for case in repository.list_cases()
     }
-    daily_runs: dict[tuple[date, str], int] = defaultdict(int)
-
     app = FastAPI(
         title="IncidentLens API",
-        version="0.1.0",
+        version="0.2.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.add_middleware(
@@ -231,13 +229,19 @@ def create_app(*, testing: bool = False) -> FastAPI:
             detail={"case_id": case.id, "mode": payload.mode},
         )
 
-        token = authorization or role
-        rate_key = (datetime.now(UTC).date(), token)
-        if role != "admin" and daily_runs[rate_key] >= settings.runner_daily_limit:
-            store.mark_status(record.id, "canceled")
-            raise HTTPException(status_code=429, detail="Daily live-run quota exhausted")
-        if payload.mode == "live":
-            daily_runs[rate_key] += 1
+        if payload.mode == "live" and role != "admin":
+            token = (authorization or role).removeprefix("Bearer ").strip()
+            actor_hash = sha256(token.encode("utf-8")).hexdigest()
+            if not store.consume_daily_quota(
+                actor_hash,
+                datetime.now(UTC).date(),
+                limit=settings.runner_daily_limit,
+            ):
+                store.mark_status(record.id, "canceled")
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily live-run quota exhausted",
+                )
 
         if settings.task_mode == "inline" or payload.mode == "replay":
             result = engine.run(
@@ -267,6 +271,36 @@ def create_app(*, testing: bool = False) -> FastAPI:
             "mode": payload.mode,
             "idempotent_replay": False,
         }
+
+    @app.get("/api/v1/investigations")
+    def list_investigations(
+        _role: Role = Depends(runner),
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        status_filter: Annotated[str | None, Query(alias="status", max_length=30)] = None,
+        case_id: Annotated[str | None, Query(max_length=120)] = None,
+    ) -> dict[str, object]:
+        return store.list_investigations(
+            limit=limit,
+            offset=offset,
+            status=status_filter,
+            case_id=case_id,
+        )
+
+    @app.get("/api/v1/audit-events")
+    def list_audit_events(
+        _role: Role = Depends(admin),
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        action: Annotated[str | None, Query(max_length=100)] = None,
+        resource_id: Annotated[str | None, Query(max_length=120)] = None,
+    ) -> dict[str, object]:
+        return store.list_audit_events(
+            limit=limit,
+            offset=offset,
+            action=action,
+            resource_id=resource_id,
+        )
 
     @app.get("/api/v1/investigations/{investigation_id}")
     def get_investigation(investigation_id: str) -> dict[str, object]:

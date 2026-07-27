@@ -134,3 +134,29 @@ export interface InvestigationWindow {
   startAt: string;
   endAt: string;
 }
+
+export interface InvestigationSummary {
+  investigation_id: string;
+  incident_case_id: string;
+  mode: "live" | "replay";
+  status: string;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuditEvent {
+  id: number;
+  actor: string;
+  action: string;
+  resource_id: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface Page<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}

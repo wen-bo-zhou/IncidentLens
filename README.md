@@ -10,6 +10,7 @@ Evidence-first AI production incident investigation assistant. It correlates log
 - OpenAI-compatible `qwen-plus` model gateway with an offline deterministic fallback.
 - FastAPI REST/SSE API, idempotent live runs, SQLite development storage and PostgreSQL/pgvector production configuration.
 - Guest/runner/admin roles, daily live-run quota, import validation and sandbox approval.
+- Database-backed per-runner daily quota, paginated investigation history and an admin-only audit ledger.
 - Next.js incident console, causal-spine timeline, evidence dialog and evaluation console.
 - Prometheus metrics, OpenTelemetry spans, Docker Compose and optional Grafana/Tempo profile.
 - Deterministic one-shot baseline versus Agent evaluation, Markdown export and admin-approved sandbox simulation.
@@ -37,6 +38,10 @@ pnpm dev
 ```
 
 Open `http://localhost:3000`. Without `MODEL_API_KEY`, the application runs the deterministic, fully auditable offline investigation path.
+
+Administrators can open `http://localhost:3000/operations` to filter durable
+investigation history and audit events. The token remains only in the current
+page memory and is cleared on refresh.
 
 ## Docker
 
@@ -76,3 +81,5 @@ Detailed design and operations: [`docs/architecture.md`](docs/architecture.md), 
 IncidentLens 是一个证据优先的 AI 生产事故调查助手。它把日志、指标、分布式 Trace 和 Runbook 放进受约束状态机，输出可追溯的因果时间线、候选根因和沙箱处置建议。
 
 默认无需模型密钥即可回放全部演示；配置任意 OpenAI-compatible 接口后，系统会调用模型生成结构化事故叙述，但根因排名与质量门槛仍由确定性评分控制。详细设计见 `docs/architecture.md`、`docs/evaluation.md` 和 `docs/threat-model.md`。
+
+管理员可以打开 `/operations` 查看可筛选的调查历史和审计轨迹；Runner 每日配额已持久化到数据库，服务重启或多 Worker 部署不会重置计数。

@@ -34,8 +34,8 @@ with sync_playwright() as playwright:
     try:
         page.get_by_role("heading", name="结算发布后支付超时").wait_for(timeout=15_000)
     except Exception:
-        print("INITIAL BODY:\n", page.locator("body").inner_text())
-        print("CONSOLE ERRORS:\n", console_errors)
+        print("INITIAL BODY:\n", ascii(page.locator("body").inner_text()))
+        print("CONSOLE ERRORS:\n", ascii(console_errors))
         raise
     page.get_by_text("事故因果时间线").wait_for()
     page.screenshot(path=ARTIFACTS / "incidentlens-desktop.png", full_page=True)
@@ -93,7 +93,15 @@ with sync_playwright() as playwright:
     )
     page.get_by_label("管理员令牌").fill("admin-demo-token")
     page.get_by_role("button", name="确认导入").click()
-    page.get_by_role("heading", name="浏览器导入的待调查事故").wait_for(timeout=15_000)
+    try:
+        page.get_by_role("heading", name="浏览器导入的待调查事故").wait_for(
+            timeout=15_000
+        )
+    except Exception:
+        print("IMPORT BODY:\n", ascii(page.locator("body").inner_text()))
+        print("CONSOLE ERRORS:\n", ascii(console_errors))
+        print("HTTP ERRORS:\n", ascii(http_errors))
+        raise
     page.get_by_role("button", name="实时调查").click()
     assert page.get_by_label("开始时间（UTC）").input_value() == "2026-07-27T09:00"
     assert page.get_by_label("结束时间（UTC）").input_value() == "2026-07-27T10:00"
@@ -115,11 +123,27 @@ with sync_playwright() as playwright:
     page.get_by_role("heading", name="调查质量评测").wait_for()
     page.screenshot(path=ARTIFACTS / "incidentlens-evaluations.png", full_page=True)
 
+    page.goto("http://127.0.0.1:3000/operations")
+    page.wait_for_load_state("networkidle")
+    page.get_by_label("管理员令牌").fill("admin-demo-token")
+    page.get_by_role("button", name="打开运营中心").click()
+    page.get_by_role("heading", name="运行与审计").wait_for()
+    page.get_by_role("heading", name="调查历史").wait_for()
+    page.get_by_text("investigation.created", exact=True).first.wait_for()
+    page.screenshot(path=ARTIFACTS / "incidentlens-operations.png", full_page=True)
+
     mobile = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=1)
     mobile.goto("http://127.0.0.1:3000")
     mobile.wait_for_load_state("networkidle")
     mobile.get_by_role("heading", name="结算发布后支付超时").wait_for()
     mobile.screenshot(path=ARTIFACTS / "incidentlens-mobile.png", full_page=True)
+
+    mobile.goto("http://127.0.0.1:3000/operations")
+    mobile.wait_for_load_state("networkidle")
+    mobile.get_by_label("管理员令牌").fill("admin-demo-token")
+    mobile.get_by_role("button", name="打开运营中心").click()
+    mobile.get_by_role("heading", name="运行与审计").wait_for()
+    mobile.screenshot(path=ARTIFACTS / "incidentlens-operations-mobile.png", full_page=True)
 
     assert not console_errors and not http_errors, (
         f"Browser console errors: {console_errors}; HTTP errors: {http_errors}"
@@ -128,5 +152,5 @@ with sync_playwright() as playwright:
 
 print(
     "E2E smoke passed: dashboard, import, bounded live SSE, inconclusive handling, "
-    "metric/trace evidence, sandbox approval, evaluations, mobile"
+    "metric/trace evidence, sandbox approval, evaluations, operations ledger, mobile"
 )

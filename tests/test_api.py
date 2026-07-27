@@ -28,6 +28,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
+    assert response.json()["info"]["version"] == "0.2.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -401,3 +402,69 @@ def test_prometheus_metrics_do_not_capture_request_content() -> None:
     assert "incidentlens_model_tokens_total" in response.text
     assert "incidentlens_investigation_duration_seconds" in response.text
     assert "health/live" not in response.text
+
+
+def test_runner_can_filter_paginated_investigation_history() -> None:
+    client = TestClient(create_app(testing=True))
+    headers = {"Authorization": "Bearer runner-demo-token"}
+    first = client.post(
+        "/api/v1/investigations",
+        headers=headers,
+        json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
+    )
+    second = client.post(
+        "/api/v1/investigations",
+        headers=headers,
+        json={"incident_case_id": "db-pool-showcase", "mode": "live"},
+    )
+
+    forbidden = client.get("/api/v1/investigations")
+    response = client.get(
+        "/api/v1/investigations",
+        headers=headers,
+        params={
+            "case_id": "db-pool-showcase",
+            "status": "completed",
+            "limit": 1,
+            "offset": 0,
+        },
+    )
+
+    assert forbidden.status_code == 403
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["investigation_id"] == second.json()[
+        "investigation_id"
+    ]
+    assert response.json()["items"][0]["incident_case_id"] == "db-pool-showcase"
+    assert response.json()["items"][0]["status"] == "completed"
+    assert first.json()["investigation_id"] != second.json()["investigation_id"]
+
+
+def test_only_admin_can_read_filtered_audit_history() -> None:
+    client = TestClient(create_app(testing=True))
+    runner_headers = {"Authorization": "Bearer runner-demo-token"}
+    admin_headers = {"Authorization": "Bearer admin-demo-token"}
+    created = client.post(
+        "/api/v1/investigations",
+        headers=runner_headers,
+        json={"incident_case_id": "poison-message-showcase", "mode": "live"},
+    )
+
+    forbidden = client.get("/api/v1/audit-events", headers=runner_headers)
+    response = client.get(
+        "/api/v1/audit-events",
+        headers=admin_headers,
+        params={
+            "action": "investigation.created",
+            "resource_id": created.json()["investigation_id"],
+        },
+    )
+
+    assert forbidden.status_code == 403
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["actor"] == "runner"
+    assert response.json()["items"][0]["detail"]["case_id"] == (
+        "poison-message-showcase"
+    )

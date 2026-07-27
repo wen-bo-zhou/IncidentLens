@@ -1,12 +1,25 @@
 import type {
+  AuditEvent,
   EvaluationSummary,
   IncidentCase,
   InvestigationDetail,
   InvestigationReport,
+  InvestigationSummary,
   InvestigationWindow,
+  Page,
 } from "@/lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+
+function queryString(
+  values: Record<string, string | number | undefined>,
+): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  }
+  return query.toString();
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isMultipart =
@@ -92,4 +105,40 @@ export const api = {
       method: "POST",
       headers: { Authorization: `Bearer ${adminToken}` },
     }),
+  investigationHistory: (
+    token: string,
+    filters: {
+      status?: string;
+      caseId?: string;
+      limit: number;
+      offset: number;
+    },
+  ) =>
+    request<Page<InvestigationSummary>>(
+      `/api/v1/investigations?${queryString({
+        limit: filters.limit,
+        offset: filters.offset,
+        status: filters.status,
+        case_id: filters.caseId,
+      })}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    ),
+  auditEvents: (
+    adminToken: string,
+    filters: {
+      action?: string;
+      resourceId?: string;
+      limit: number;
+      offset: number;
+    },
+  ) =>
+    request<Page<AuditEvent>>(
+      `/api/v1/audit-events?${queryString({
+        limit: filters.limit,
+        offset: filters.offset,
+        action: filters.action,
+        resource_id: filters.resourceId,
+      })}`,
+      { headers: { Authorization: `Bearer ${adminToken}` } },
+    ),
 };

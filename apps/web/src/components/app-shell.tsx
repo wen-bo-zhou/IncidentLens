@@ -1,7 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CircleDotDashed, FlaskConical, Radar } from "lucide-react";
+import {
+  AlertTriangle,
+  CircleDotDashed,
+  ClipboardList,
+  FlaskConical,
+  Radar,
+} from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
@@ -176,6 +182,7 @@ export function AppShell() {
         <nav aria-label="主导航">
           <Link className="nav-link active" href="/"><CircleDotDashed size={15} />调查台</Link>
           <Link className="nav-link" href="/evaluations"><FlaskConical size={15} />评测</Link>
+          <Link className="nav-link" href="/operations"><ClipboardList size={15} />运营</Link>
         </nav>
         <div className="system-status"><span />DEMO REPLAY · HEALTHY</div>
       </header>

@@ -83,4 +83,42 @@ describe("api", () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(new Headers(init.headers).has("Content-Type")).toBe(false);
   });
+
+  it("sends operations filters and credentials when reading history", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ items: [], total: 0, limit: 20, offset: 0 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.investigationHistory("admin-token", {
+      status: "failed",
+      caseId: "case/1",
+      limit: 20,
+      offset: 40,
+    });
+    await api.auditEvents("admin-token", {
+      action: "investigation.created",
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/investigations?limit=20&offset=40&status=failed&case_id=case%2F1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer admin-token",
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/audit-events?limit=20&offset=0&action=investigation.created",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer admin-token",
+        }),
+      }),
+    );
+  });
 });

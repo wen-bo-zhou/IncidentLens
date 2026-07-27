@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -16,7 +17,9 @@ from sqlalchemy import (
     create_engine,
     func,
     select,
+    update,
 )
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -97,6 +100,15 @@ class AuditRecord(Base):
     resource_id: Mapped[str] = mapped_column(String(120), index=True)
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DailyRunUsageRecord(Base):
+    __tablename__ = "daily_run_usage"
+
+    usage_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    actor_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class IncidentPackageRecord(Base):
@@ -236,6 +248,91 @@ class InvestigationStore:
                     .order_by(AuditRecord.id)
                 ).all()
             )
+
+    def list_audit_events(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        action: str | None = None,
+        resource_id: str | None = None,
+    ) -> dict[str, Any]:
+        filters = []
+        if action is not None:
+            filters.append(AuditRecord.action == action)
+        if resource_id is not None:
+            filters.append(AuditRecord.resource_id == resource_id)
+        with self.session_factory() as session:
+            total = int(
+                session.scalar(
+                    select(func.count(AuditRecord.id)).where(*filters)
+                )
+                or 0
+            )
+            records = session.scalars(
+                select(AuditRecord)
+                .where(*filters)
+                .order_by(AuditRecord.id.desc())
+                .offset(offset)
+                .limit(limit)
+            ).all()
+            return {
+                "items": [
+                    {
+                        "id": record.id,
+                        "actor": record.actor,
+                        "action": record.action,
+                        "resource_id": record.resource_id,
+                        "detail": record.detail,
+                        "created_at": record.created_at.isoformat(),
+                    }
+                    for record in records
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    def consume_daily_quota(
+        self,
+        actor_hash: str,
+        usage_date: date,
+        *,
+        limit: int,
+    ) -> bool:
+        now = datetime.now(UTC)
+        with self.session_factory() as session:
+            if session.get(DailyRunUsageRecord, (usage_date, actor_hash)) is None:
+                session.add(
+                    DailyRunUsageRecord(
+                        usage_date=usage_date,
+                        actor_hash=actor_hash,
+                        run_count=0,
+                        updated_at=now,
+                    )
+                )
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+        with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(DailyRunUsageRecord)
+                    .where(
+                        DailyRunUsageRecord.usage_date == usage_date,
+                        DailyRunUsageRecord.actor_hash == actor_hash,
+                        DailyRunUsageRecord.run_count < limit,
+                    )
+                    .values(
+                        run_count=DailyRunUsageRecord.run_count + 1,
+                        updated_at=now,
+                    )
+                ),
+            )
+            session.commit()
+            return result.rowcount == 1
 
     def ping(self) -> None:
         with self.session_factory() as session:
@@ -446,6 +543,56 @@ class InvestigationStore:
                     }
                     for item in remediations
                 ],
+            }
+
+    def list_investigations(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        status: str | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]:
+        filters = []
+        if status is not None:
+            filters.append(InvestigationRecord.status == status)
+        if case_id is not None:
+            filters.append(InvestigationRecord.case_id == case_id)
+        with self.session_factory() as session:
+            total = int(
+                session.scalar(
+                    select(func.count(InvestigationRecord.id)).where(*filters)
+                )
+                or 0
+            )
+            records = session.scalars(
+                select(InvestigationRecord)
+                .where(*filters)
+                .order_by(
+                    InvestigationRecord.created_at.desc(),
+                    InvestigationRecord.id.desc(),
+                )
+                .offset(offset)
+                .limit(limit)
+            ).all()
+            return {
+                "items": [
+                    {
+                        "investigation_id": record.id,
+                        "incident_case_id": record.case_id,
+                        "mode": record.mode,
+                        "status": record.status,
+                        "summary": (
+                            record.report.get("summary") if record.report else None
+                        ),
+                        "created_at": record.created_at.isoformat(),
+                        "updated_at": record.updated_at.isoformat(),
+                    }
+                    for record in records
+                ],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
             }
 
     def events_after(self, investigation_id: str, sequence: int) -> list[dict[str, Any]]:
