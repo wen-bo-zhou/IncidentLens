@@ -24,7 +24,7 @@ from pydantic import BaseModel, model_validator
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
-from incidentlens.auth import Role, require_role
+from incidentlens.auth import Principal, require_role
 from incidentlens.config import Settings, get_settings
 from incidentlens.db import InvestigationStore, create_session_factory
 from incidentlens.evals import EvaluationRunner
@@ -60,11 +60,25 @@ class StreamTicket(BaseModel):
     expires_at: datetime
 
 
-def create_app(*, testing: bool = False) -> FastAPI:
-    settings = Settings(
-        database_url="sqlite://" if testing else get_settings().database_url,
-        task_mode="inline" if testing else get_settings().task_mode,
-    )
+def create_app(
+    *,
+    testing: bool = False,
+    settings: Settings | None = None,
+) -> FastAPI:
+    if settings is None:
+        settings = (
+            Settings(
+                app_env="test",
+                database_url="sqlite://",
+                task_mode="inline",
+            )
+            if testing
+            else get_settings()
+        )
+    elif testing:
+        settings = settings.model_copy(
+            update={"database_url": "sqlite://", "task_mode": "inline"}
+        )
     repository = ScenarioRepository.seeded()
     session_factory = create_session_factory(settings.database_url, testing=testing)
     store = InvestigationStore(session_factory)
@@ -87,12 +101,12 @@ def create_app(*, testing: bool = False) -> FastAPI:
     }
     app = FastAPI(
         title="IncidentLens API",
-        version="0.3.0",
+        version="0.4.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -141,7 +155,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
 
     @app.post("/api/v1/incidents/import", status_code=status.HTTP_201_CREATED)
     async def import_incident(
-        _role: Role = Depends(admin), file: UploadFile = File(...)
+        principal: Principal = Depends(admin), file: UploadFile = File(...)
     ) -> dict[str, object]:
         filename = file.filename or ""
         if "/" in filename or "\\" in filename or filename in {".", ".."}:
@@ -159,7 +173,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         store.record_audit(
-            actor=_role,
+            actor=principal.actor,
             action="incident.imported",
             resource_id=case.id,
             detail={"package_hash": package_hash, "size_bytes": len(content)},
@@ -169,8 +183,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
     @app.post("/api/v1/investigations", status_code=status.HTTP_202_ACCEPTED)
     def create_investigation(
         payload: InvestigationCreate,
-        role: Role = Depends(runner),
-        authorization: Annotated[str | None, Header()] = None,
+        principal: Principal = Depends(runner),
         idempotency_key: Annotated[
             str | None, Header(alias="Idempotency-Key", max_length=128)
         ] = None,
@@ -228,17 +241,17 @@ def create_app(*, testing: bool = False) -> FastAPI:
             }
 
         store.record_audit(
-            actor=role,
+            actor=principal.actor,
             action="investigation.created",
             resource_id=record.id,
             detail={"case_id": case.id, "mode": payload.mode},
         )
 
-        if payload.mode == "live" and role != "admin":
-            token = (authorization or role).removeprefix("Bearer ").strip()
-            actor_hash = sha256(token.encode("utf-8")).hexdigest()
+        if payload.mode == "live" and principal.role != "admin":
+            if principal.token_hash is None:
+                raise HTTPException(status_code=403, detail="Insufficient role")
             if not store.consume_daily_quota(
-                actor_hash,
+                principal.token_hash,
                 datetime.now(UTC).date(),
                 limit=settings.runner_daily_limit,
             ):
@@ -279,7 +292,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
 
     @app.get("/api/v1/investigations")
     def list_investigations(
-        _role: Role = Depends(runner),
+        _principal: Principal = Depends(runner),
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
         status_filter: Annotated[str | None, Query(alias="status", max_length=30)] = None,
@@ -294,7 +307,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
 
     @app.get("/api/v1/audit-events")
     def list_audit_events(
-        _role: Role = Depends(admin),
+        _principal: Principal = Depends(admin),
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
         action: Annotated[str | None, Query(max_length=100)] = None,
@@ -310,7 +323,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
     @app.get("/api/v1/investigations/{investigation_id}")
     def get_investigation(
         investigation_id: str,
-        _role: Role = Depends(runner),
+        _principal: Principal = Depends(runner),
     ) -> dict[str, object]:
         value = store.get(investigation_id)
         if value is None:
@@ -324,7 +337,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
     )
     def issue_stream_ticket(
         investigation_id: str,
-        role: Role = Depends(runner),
+        principal: Principal = Depends(runner),
     ) -> StreamTicket:
         expires_at = datetime.now(UTC) + timedelta(minutes=5)
         try:
@@ -338,7 +351,7 @@ def create_app(*, testing: bool = False) -> FastAPI:
                 detail="Investigation not found",
             ) from exc
         store.record_audit(
-            actor=role,
+            actor=principal.actor,
             action="investigation.stream_ticket_issued",
             resource_id=investigation_id,
             detail={"expires_at": expires_at.isoformat()},
@@ -384,12 +397,12 @@ def create_app(*, testing: bool = False) -> FastAPI:
 
     @app.post("/api/v1/investigations/{investigation_id}/cancel", status_code=202)
     def cancel_investigation(
-        investigation_id: str, role: Role = Depends(runner)
+        investigation_id: str, principal: Principal = Depends(runner)
     ) -> dict[str, str]:
         if not store.cancel(investigation_id):
             raise HTTPException(status_code=409, detail="Investigation cannot be canceled")
         store.record_audit(
-            actor=role,
+            actor=principal.actor,
             action="investigation.canceled",
             resource_id=investigation_id,
         )
@@ -401,20 +414,24 @@ def create_app(*, testing: bool = False) -> FastAPI:
     def approve_remediation(
         investigation_id: str,
         proposal_id: str,
-        role: Role = Depends(admin),
+        principal: Principal = Depends(admin),
     ) -> dict[str, object]:
         try:
-            return store.approve_and_simulate(investigation_id, proposal_id, actor=role)
+            return store.approve_and_simulate(
+                investigation_id,
+                proposal_id,
+                actor=principal.actor,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Remediation not found") from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/eval-runs")
-    def create_eval_run(_role: Role = Depends(admin)) -> dict[str, object]:
+    def create_eval_run(principal: Principal = Depends(admin)) -> dict[str, object]:
         result = EvaluationRunner(repository).run(include_hidden=True)
         store.record_audit(
-            actor=_role,
+            actor=principal.actor,
             action="evaluation.completed",
             resource_id=f"eval-{datetime.now(UTC).isoformat()}",
             detail={"case_count": result.case_count, "root_cause_top1": result.root_cause_top1},

@@ -1,4 +1,7 @@
 from collections.abc import Callable
+from dataclasses import dataclass
+from hashlib import sha256
+from secrets import compare_digest
 from typing import Literal
 
 from fastapi import Header, HTTPException
@@ -8,22 +11,42 @@ from incidentlens.config import Settings
 Role = Literal["guest", "runner", "admin"]
 
 
-def role_from_header(authorization: str | None, settings: Settings) -> Role:
+@dataclass(frozen=True)
+class Principal:
+    role: Role
+    actor: str
+    token_hash: str | None = None
+
+
+def principal_from_header(
+    authorization: str | None, settings: Settings
+) -> Principal:
     if not authorization or not authorization.startswith("Bearer "):
-        return "guest"
+        return Principal(role="guest", actor="guest")
     token = authorization.removeprefix("Bearer ").strip()
-    if token == settings.admin_token:
-        return "admin"
-    if token == settings.runner_token:
-        return "runner"
-    return "guest"
+    for role in ("admin", "runner"):
+        for actor, expected in settings.credentials_for(role):
+            if compare_digest(
+                token.encode("utf-8"),
+                expected.encode("utf-8"),
+            ):
+                return Principal(
+                    role=role,
+                    actor=actor,
+                    token_hash=sha256(token.encode("utf-8")).hexdigest(),
+                )
+    return Principal(role="guest", actor="guest")
 
 
-def require_role(settings: Settings, *allowed: Role) -> Callable[[str | None], Role]:
-    def dependency(authorization: str | None = Header(default=None)) -> Role:
-        role = role_from_header(authorization, settings)
-        if role not in allowed:
+def require_role(
+    settings: Settings, *allowed: Role
+) -> Callable[[str | None], Principal]:
+    def dependency(
+        authorization: str | None = Header(default=None),
+    ) -> Principal:
+        principal = principal_from_header(authorization, settings)
+        if principal.role not in allowed:
             raise HTTPException(status_code=403, detail="Insufficient role")
-        return role
+        return principal
 
     return dependency

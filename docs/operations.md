@@ -32,6 +32,27 @@ issuance is recorded as `investigation.stream_ticket_issued` without the raw
 value. The API redacts the `ticket` query parameter from Uvicorn access logs;
 configure any additional public reverse-proxy logs to do the same.
 
+## Production access configuration
+
+Set `APP_ENV=production` before exposing the live API. Startup then rejects
+demo credentials, credentials shorter than 32 characters, credentials reused
+across actors or roles, actor names reused across roles, unsafe actor names,
+and wildcard or non-origin CORS entries.
+
+For one credential per role, set unique `RUNNER_TOKEN` and `ADMIN_TOKEN`
+values. For multiple operators, use JSON maps; a non-empty map replaces the
+single-token setting for that role:
+
+```dotenv
+RUNNER_CREDENTIALS={"oncall-primary":"replace-with-32-plus-characters"}
+ADMIN_CREDENTIALS={"security-lead":"replace-with-another-32-plus-characters"}
+CORS_ORIGINS=["https://incidentlens.example.com"]
+```
+
+The map key is written to the audit ledger as the actor. Raw credentials are
+never persisted, and responses to requests carrying authorization or stream
+tickets are marked `Cache-Control: no-store`.
+
 ## Database lifecycle
 
 The API container runs `alembic upgrade head` before serving traffic. Before an upgrade, create a backup:

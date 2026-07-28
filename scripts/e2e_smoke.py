@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from hashlib import sha256
 from pathlib import Path
@@ -8,6 +9,8 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ROOT / "artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
+RUNNER_TOKEN = os.getenv("E2E_RUNNER_TOKEN", "runner-demo-token")
+ADMIN_TOKEN = os.getenv("E2E_ADMIN_TOKEN", "admin-demo-token")
 
 
 with sync_playwright() as playwright:
@@ -50,11 +53,11 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="关闭证据详情").click()
 
     page.get_by_role("button", name="实时调查").click()
-    page.get_by_label("Runner 令牌").fill("runner-demo-token")
+    page.get_by_label("Runner 令牌").fill(RUNNER_TOKEN)
     page.get_by_role("button", name="确认启动").click()
     page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
     page.get_by_role("button", name="需要管理员审批").click()
-    page.get_by_label("管理员令牌").fill("admin-demo-token")
+    page.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
     page.get_by_role("button", name="批准并模拟").click()
     page.get_by_role("button", name="沙箱模拟已完成").wait_for(timeout=15_000)
 
@@ -91,7 +94,7 @@ with sync_playwright() as playwright:
             "buffer": json.dumps(imported_pack, ensure_ascii=False).encode(),
         }
     )
-    page.get_by_label("管理员令牌").fill("admin-demo-token")
+    page.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
     page.get_by_role("button", name="确认导入").click()
     try:
         page.get_by_role("heading", name="浏览器导入的待调查事故").wait_for(
@@ -105,7 +108,7 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="实时调查").click()
     assert page.get_by_label("开始时间（UTC）").input_value() == "2026-07-27T09:00"
     assert page.get_by_label("结束时间（UTC）").input_value() == "2026-07-27T10:00"
-    page.get_by_label("Runner 令牌").fill("runner-demo-token")
+    page.get_by_label("Runner 令牌").fill(RUNNER_TOKEN)
     page.get_by_role("button", name="确认启动").click()
     page.get_by_text("inconclusive", exact=True).wait_for(timeout=15_000)
     page.get_by_role("heading", name="证据不足，无法判定根因").wait_for()
@@ -125,7 +128,7 @@ with sync_playwright() as playwright:
 
     page.goto("http://127.0.0.1:3000/operations")
     page.wait_for_load_state("networkidle")
-    page.get_by_label("管理员令牌").fill("admin-demo-token")
+    page.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
     page.get_by_role("button", name="打开运营中心").click()
     page.get_by_role("heading", name="运行与审计").wait_for()
     page.get_by_role("heading", name="调查历史").wait_for()
@@ -140,7 +143,7 @@ with sync_playwright() as playwright:
 
     mobile.goto("http://127.0.0.1:3000/operations")
     mobile.wait_for_load_state("networkidle")
-    mobile.get_by_label("管理员令牌").fill("admin-demo-token")
+    mobile.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
     mobile.get_by_role("button", name="打开运营中心").click()
     mobile.get_by_role("heading", name="运行与审计").wait_for()
     mobile.screenshot(path=ARTIFACTS / "incidentlens-operations-mobile.png", full_page=True)

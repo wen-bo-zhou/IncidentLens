@@ -142,6 +142,11 @@ def configure_observability(app: FastAPI) -> TelemetryMetrics:
             requests.labels(method=request.method, status=str(response.status_code)).inc()
             latency.labels(method=request.method).observe(perf_counter() - started)
             span.set_attribute("http.response.status_code", response.status_code)
+            if (
+                request.headers.get("authorization") is not None
+                or request.query_params.get("ticket") is not None
+            ):
+                response.headers["Cache-Control"] = "no-store"
             return response
 
     @app.get("/metrics", include_in_schema=False)

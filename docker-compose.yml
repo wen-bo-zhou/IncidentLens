@@ -1,6 +1,7 @@
 name: incidentlens
 
 x-api-environment: &api-environment
+  APP_ENV: ${APP_ENV:-development}
   DATABASE_URL: postgresql+psycopg://incidentlens:incidentlens@postgres:5432/incidentlens
   REDIS_URL: redis://redis:6379/0
   TASK_MODE: celery
@@ -10,6 +11,9 @@ x-api-environment: &api-environment
   MAX_COST_CNY: ${MAX_COST_CNY:-0.20}
   RUNNER_TOKEN: ${RUNNER_TOKEN:-runner-demo-token}
   ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-demo-token}
+  RUNNER_CREDENTIALS:
+  ADMIN_CREDENTIALS:
+  CORS_ORIGINS:
   RUNNER_DAILY_LIMIT: ${RUNNER_DAILY_LIMIT:-10}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 

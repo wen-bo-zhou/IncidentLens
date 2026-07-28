@@ -14,6 +14,8 @@
 - Secret redaction before model use; Prometheus labels exclude paths and content.
 - Guest replay, runner quota and admin-only import/evaluation/approval.
 - Runner/admin authorization for live reports; short-lived, investigation-scoped SSE tickets persisted only as SHA-256 digests.
+- Constant-time credential checks, named audit principals and production rejection of demo, weak or duplicate credentials.
+- Exact-origin credentialed CORS and `no-store` on authenticated responses.
 - Idempotent request/result persistence, durable audit events and one-time remediation state transition.
 
 SSE tickets travel in the event-stream query string because browser

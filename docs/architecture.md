@@ -18,3 +18,9 @@ by a SHA-256 token digest in the daily quota table, and quota consumption uses
 an atomic conditional update so restarts and multiple API workers share the same
 limit. Runner/admin users can read paginated investigation history; only admins
 can read the filtered audit ledger exposed by the `/operations` console.
+
+Access configuration supports either one legacy token per role or named JSON
+credential maps. A non-empty named map replaces the legacy token for that role;
+the selected name becomes the durable audit actor while quota keys remain
+one-way token digests. Production startup rejects demo, short or duplicate
+credentials and accepts only an explicit exact-origin CORS allowlist.

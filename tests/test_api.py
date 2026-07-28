@@ -6,6 +6,7 @@ from time import sleep
 
 from fastapi.testclient import TestClient
 from incidentlens.app import create_app
+from incidentlens.config import Settings
 from incidentlens.observability import redact_access_log_path
 from incidentlens.scenarios import ScenarioRepository
 from incidentlens.schemas import WorkflowEvent
@@ -41,7 +42,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.3.0"
+    assert response.json()["info"]["version"] == "0.4.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -67,6 +68,90 @@ def test_runner_can_create_and_read_inline_investigation() -> None:
     assert detail.json()["report"]["ranked_hypotheses"][0]["root_cause_category"] == (
         "deployment_config"
     )
+
+
+def test_named_runner_credential_is_used_as_the_audit_actor() -> None:
+    settings = Settings(
+        runner_credentials={
+            "oncall-primary": "runner-named-token-00000000000001"
+        },
+        admin_credentials={
+            "security-lead": "admin-named-token-000000000000001"
+        },
+        _env_file=None,
+    )
+    client = TestClient(create_app(testing=True, settings=settings))
+    created = client.post(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer runner-named-token-00000000000001"},
+        json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
+    )
+    legacy_demo = client.post(
+        "/api/v1/investigations",
+        headers=RUNNER_HEADERS,
+        json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
+    )
+
+    assert created.status_code == 202
+    assert legacy_demo.status_code == 403
+
+    audit = client.get(
+        "/api/v1/audit-events",
+        headers={"Authorization": "Bearer admin-named-token-000000000000001"},
+        params={
+            "action": "investigation.created",
+            "resource_id": created.json()["investigation_id"],
+        },
+    )
+    assert audit.status_code == 200
+    assert audit.json()["items"][0]["actor"] == "oncall-primary"
+
+
+def test_authenticated_responses_are_not_cacheable() -> None:
+    client = TestClient(create_app(testing=True))
+    created = client.post(
+        "/api/v1/investigations",
+        headers=RUNNER_HEADERS,
+        json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
+    )
+
+    detail = client.get(
+        f"/api/v1/investigations/{created.json()['investigation_id']}",
+        headers=RUNNER_HEADERS,
+    )
+    replay = client.get("/api/v1/demo/replays/deploy-timeout-showcase")
+
+    assert detail.headers["Cache-Control"] == "no-store"
+    assert replay.headers.get("Cache-Control") != "no-store"
+
+
+def test_cors_uses_the_configured_exact_origin_allowlist() -> None:
+    settings = Settings(
+        cors_origins=["https://console.incidentlens.example"],
+        _env_file=None,
+    )
+    client = TestClient(create_app(testing=True, settings=settings))
+    preflight_headers = {"Access-Control-Request-Method": "GET"}
+
+    allowed = client.options(
+        "/api/v1/incidents",
+        headers={
+            **preflight_headers,
+            "Origin": "https://console.incidentlens.example",
+        },
+    )
+    denied = client.options(
+        "/api/v1/incidents",
+        headers={
+            **preflight_headers,
+            "Origin": "https://attacker.example",
+        },
+    )
+
+    assert allowed.headers["Access-Control-Allow-Origin"] == (
+        "https://console.incidentlens.example"
+    )
+    assert "Access-Control-Allow-Origin" not in denied.headers
 
 
 def test_investigation_time_window_limits_the_evidence_used() -> None:
