@@ -16,6 +16,7 @@
 - Runner/admin authorization for live reports; short-lived, investigation-scoped SSE tickets persisted only as SHA-256 digests.
 - Constant-time credential checks, named audit principals and production rejection of demo, weak or duplicate credentials.
 - Exact-origin credentialed CORS and `no-store` on authenticated responses.
+- Owner-scoped Runner history, report access, stream-ticket issuance, cancellation and idempotency keys; administrators retain global access.
 - Idempotent request/result persistence, durable audit events and one-time remediation state transition.
 
 SSE tickets travel in the event-stream query string because browser

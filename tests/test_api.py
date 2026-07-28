@@ -1,9 +1,8 @@
 import json
 import logging
 from datetime import UTC, datetime
-from threading import Thread
-from time import sleep
 
+import pytest
 from fastapi.testclient import TestClient
 from incidentlens.app import create_app
 from incidentlens.config import Settings
@@ -21,6 +20,20 @@ def _stream_ticket(client: TestClient, investigation_id: str) -> str:
     )
     assert response.status_code == 201
     return str(response.json()["ticket"])
+
+
+def _multi_runner_client() -> TestClient:
+    settings = Settings(
+        runner_credentials={
+            "oncall-a": "runner-a-token-00000000000000000001",
+            "oncall-b": "runner-b-token-00000000000000000001",
+        },
+        admin_credentials={
+            "security-lead": "admin-token-00000000000000000000001",
+        },
+        _env_file=None,
+    )
+    return TestClient(create_app(testing=True, settings=settings))
 
 
 def test_guest_can_list_showcase_cases_but_not_hidden_truth() -> None:
@@ -42,7 +55,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.4.0"
+    assert response.json()["info"]["version"] == "0.5.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -105,6 +118,81 @@ def test_named_runner_credential_is_used_as_the_audit_actor() -> None:
     )
     assert audit.status_code == 200
     assert audit.json()["items"][0]["actor"] == "oncall-primary"
+
+
+def test_runner_access_is_scoped_to_the_investigation_owner() -> None:
+    client = _multi_runner_client()
+    owner_headers = {
+        "Authorization": "Bearer runner-a-token-00000000000000000001"
+    }
+    other_headers = {
+        "Authorization": "Bearer runner-b-token-00000000000000000001"
+    }
+    admin_headers = {
+        "Authorization": "Bearer admin-token-00000000000000000000001"
+    }
+    created = client.post(
+        "/api/v1/investigations",
+        headers=owner_headers,
+        json={"incident_case_id": "deploy-timeout-showcase", "mode": "live"},
+    )
+    investigation_id = created.json()["investigation_id"]
+    client.app.state.store.mark_status(investigation_id, "queued")
+
+    other_history = client.get("/api/v1/investigations", headers=other_headers)
+    admin_history = client.get("/api/v1/investigations", headers=admin_headers)
+    other_detail = client.get(
+        f"/api/v1/investigations/{investigation_id}",
+        headers=other_headers,
+    )
+    admin_detail = client.get(
+        f"/api/v1/investigations/{investigation_id}",
+        headers=admin_headers,
+    )
+    other_ticket = client.post(
+        f"/api/v1/investigations/{investigation_id}/stream-ticket",
+        headers=other_headers,
+    )
+    other_cancel = client.post(
+        f"/api/v1/investigations/{investigation_id}/cancel",
+        headers=other_headers,
+    )
+
+    assert created.status_code == 202
+    assert other_history.json()["total"] == 0
+    assert admin_history.json()["total"] == 1
+    assert other_detail.status_code == 404
+    assert admin_detail.status_code == 200
+    assert other_ticket.status_code == 404
+    assert other_cancel.status_code == 404
+
+
+def test_idempotency_keys_are_scoped_to_the_runner_identity() -> None:
+    client = _multi_runner_client()
+    payload = {"incident_case_id": "db-pool-showcase", "mode": "live"}
+    shared_key = "same-client-generated-key"
+
+    first = client.post(
+        "/api/v1/investigations",
+        headers={
+            "Authorization": "Bearer runner-a-token-00000000000000000001",
+            "Idempotency-Key": shared_key,
+        },
+        json=payload,
+    )
+    second = client.post(
+        "/api/v1/investigations",
+        headers={
+            "Authorization": "Bearer runner-b-token-00000000000000000001",
+            "Idempotency-Key": shared_key,
+        },
+        json=payload,
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["idempotent_replay"] is False
+    assert second.json()["investigation_id"] != first.json()["investigation_id"]
 
 
 def test_authenticated_responses_are_not_cacheable() -> None:
@@ -275,7 +363,11 @@ def test_runner_daily_live_run_quota_is_enforced() -> None:
 
 def test_only_runner_or_admin_can_cancel_an_active_investigation() -> None:
     client = TestClient(create_app(testing=True))
-    record = client.app.state.store.create("cancel-api-case", "live")
+    record = client.app.state.store.create(
+        "cancel-api-case",
+        "live",
+        owner_actor="runner",
+    )
 
     forbidden = client.post(f"/api/v1/investigations/{record.id}/cancel")
     canceled = client.post(
@@ -328,33 +420,50 @@ def test_sse_replays_ordered_events_and_respects_last_event_id() -> None:
     assert "id: 1\n" not in response.text
 
 
-def test_sse_waits_for_events_created_after_subscription() -> None:
+def test_sse_does_not_miss_an_event_committed_during_terminal_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = create_app(testing=True)
     client = TestClient(app)
-    record = app.state.store.create("deploy-timeout-showcase", "live")
+    record = app.state.store.create(
+        "deploy-timeout-showcase",
+        "live",
+        owner_actor="runner",
+    )
     ticket = _stream_ticket(client, record.id)
+    original_events_after = app.state.store.events_after
+    transitioned = False
 
-    def finish_later() -> None:
-        sleep(0.05)
-        app.state.store.append_event(
-            record.id,
-            WorkflowEvent(
-                sequence=1,
-                type="stage_started",
-                stage="collecting",
-                message="collecting",
-                created_at=datetime.now(UTC),
-            ),
-        )
-        app.state.store.mark_status(record.id, "completed")
+    def events_after_terminal_transition(
+        investigation_id: str,
+        sequence: int,
+    ) -> list[dict[str, object]]:
+        nonlocal transitioned
+        events = original_events_after(investigation_id, sequence)
+        if not transitioned:
+            transitioned = True
+            app.state.store.append_event(
+                record.id,
+                WorkflowEvent(
+                    sequence=1,
+                    type="stage_started",
+                    stage="collecting",
+                    message="collecting",
+                    created_at=datetime.now(UTC),
+                ),
+            )
+            app.state.store.mark_status(record.id, "completed")
+        return events
 
-    writer = Thread(target=finish_later)
-    writer.start()
+    monkeypatch.setattr(
+        app.state.store,
+        "events_after",
+        events_after_terminal_transition,
+    )
     response = client.get(
         f"/api/v1/investigations/{record.id}/events",
         params={"ticket": ticket},
     )
-    writer.join()
 
     assert response.status_code == 200
     assert "event: stage_started" in response.text

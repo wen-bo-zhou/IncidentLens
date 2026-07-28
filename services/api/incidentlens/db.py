@@ -13,6 +13,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -44,13 +45,22 @@ class Base(DeclarativeBase):
 
 class InvestigationRecord(Base):
     __tablename__ = "investigations"
+    __table_args__ = (
+        Index(
+            "uq_investigations_owner_idempotency_key",
+            "owner_actor",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     case_id: Mapped[str] = mapped_column(String(120), index=True)
     mode: Mapped[str] = mapped_column(String(20))
-    idempotency_key: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, unique=True, index=True
+    owner_actor: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
     )
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     report: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -170,12 +180,14 @@ class InvestigationStore:
         case_id: str,
         mode: str,
         *,
+        owner_actor: str | None = None,
         idempotency_key: str | None = None,
         request_fingerprint: str | None = None,
     ) -> InvestigationRecord:
         record, _created = self.create_idempotent(
             case_id,
             mode,
+            owner_actor=owner_actor,
             idempotency_key=idempotency_key,
             request_fingerprint=request_fingerprint,
         )
@@ -407,6 +419,7 @@ class InvestigationStore:
         case_id: str,
         mode: str,
         *,
+        owner_actor: str | None = None,
         idempotency_key: str | None,
         request_fingerprint: str | None = None,
     ) -> tuple[InvestigationRecord, bool]:
@@ -415,7 +428,8 @@ class InvestigationStore:
             if idempotency_key:
                 existing = session.scalar(
                     select(InvestigationRecord).where(
-                        InvestigationRecord.idempotency_key == idempotency_key
+                        InvestigationRecord.owner_actor == owner_actor,
+                        InvestigationRecord.idempotency_key == idempotency_key,
                     )
                 )
                 if existing is not None:
@@ -428,6 +442,7 @@ class InvestigationStore:
                 id=str(uuid4()),
                 case_id=case_id,
                 mode=mode,
+                owner_actor=owner_actor,
                 idempotency_key=idempotency_key,
                 request_fingerprint=request_fingerprint,
                 status="queued",
@@ -444,7 +459,8 @@ class InvestigationStore:
                     raise
                 existing = session.scalar(
                     select(InvestigationRecord).where(
-                        InvestigationRecord.idempotency_key == idempotency_key
+                        InvestigationRecord.owner_actor == owner_actor,
+                        InvestigationRecord.idempotency_key == idempotency_key,
                     )
                 )
                 if existing is None:
@@ -579,9 +595,17 @@ class InvestigationStore:
                 )
             session.commit()
 
-    def get(self, investigation_id: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        investigation_id: str,
+        *,
+        owner_actor: str | None = None,
+    ) -> dict[str, Any] | None:
         with self.session_factory() as session:
-            record = session.get(InvestigationRecord, investigation_id)
+            filters = [InvestigationRecord.id == investigation_id]
+            if owner_actor is not None:
+                filters.append(InvestigationRecord.owner_actor == owner_actor)
+            record = session.scalar(select(InvestigationRecord).where(*filters))
             if record is None:
                 return None
             remediations = session.scalars(
@@ -592,6 +616,7 @@ class InvestigationStore:
             return {
                 "investigation_id": record.id,
                 "incident_case_id": record.case_id,
+                "owner_actor": record.owner_actor,
                 "mode": record.mode,
                 "status": record.status,
                 "report": record.report,
@@ -616,12 +641,15 @@ class InvestigationStore:
         offset: int,
         status: str | None = None,
         case_id: str | None = None,
+        owner_actor: str | None = None,
     ) -> dict[str, Any]:
         filters = []
         if status is not None:
             filters.append(InvestigationRecord.status == status)
         if case_id is not None:
             filters.append(InvestigationRecord.case_id == case_id)
+        if owner_actor is not None:
+            filters.append(InvestigationRecord.owner_actor == owner_actor)
         with self.session_factory() as session:
             total = int(
                 session.scalar(
@@ -681,12 +709,18 @@ class InvestigationStore:
                 for event in events
             ]
 
-    def cancel(self, investigation_id: str) -> bool:
+    def cancel(
+        self,
+        investigation_id: str,
+        *,
+        owner_actor: str | None = None,
+    ) -> bool:
         with self.session_factory() as session:
+            filters = [InvestigationRecord.id == investigation_id]
+            if owner_actor is not None:
+                filters.append(InvestigationRecord.owner_actor == owner_actor)
             record = session.scalar(
-                select(InvestigationRecord)
-                .where(InvestigationRecord.id == investigation_id)
-                .with_for_update()
+                select(InvestigationRecord).where(*filters).with_for_update()
             )
             active_statuses = {
                 "queued",

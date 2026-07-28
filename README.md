@@ -13,6 +13,7 @@ Evidence-first AI production incident investigation assistant. It correlates log
 - Database-backed per-runner daily quota, paginated investigation history and an admin-only audit ledger.
 - Runner-protected live reports and short-lived, investigation-scoped SSE tickets stored only as hashes.
 - Named multi-credential access, production startup validation and configurable exact-origin CORS.
+- Runner-owned investigation access with administrator-wide operational visibility and identity-scoped idempotency.
 - Next.js incident console, causal-spine timeline, evidence dialog and evaluation console.
 - Prometheus metrics, OpenTelemetry spans, Docker Compose and optional Grafana/Tempo profile.
 - Deterministic one-shot baseline versus Agent evaluation, Markdown export and admin-approved sandbox simulation.
@@ -56,6 +57,11 @@ For a public deployment, set `APP_ENV=production` and either replace
 provide JSON maps through `RUNNER_CREDENTIALS` and `ADMIN_CREDENTIALS`. Named
 credentials appear as actors in the audit ledger. Set `CORS_ORIGINS` to a JSON
 array of exact browser origins; wildcard origins are rejected.
+
+Each Runner can list, read, stream and cancel only investigations created by
+that named identity. Administrators retain access to every investigation.
+Idempotency keys are isolated per identity, so different operators can safely
+reuse the same client-generated key.
 
 ## Docker
 

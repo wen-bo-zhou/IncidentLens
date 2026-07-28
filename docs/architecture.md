@@ -24,3 +24,11 @@ credential maps. A non-empty named map replaces the legacy token for that role;
 the selected name becomes the durable audit actor while quota keys remain
 one-way token digests. Production startup rejects demo, short or duplicate
 credentials and accepts only an explicit exact-origin CORS allowlist.
+
+Every newly created investigation persists the principal actor as its owner.
+Runner history, detail reads, stream-ticket issuance and cancellation are
+filtered by that owner; administrators retain a global operational view.
+Idempotency uniqueness is scoped to `(owner_actor, idempotency_key)`. The
+ownership migration backfills existing rows from their
+`investigation.created` audit event, while rows without a recoverable owner
+remain administrator-only.

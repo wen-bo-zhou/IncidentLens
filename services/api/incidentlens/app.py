@@ -101,7 +101,7 @@ def create_app(
     }
     app = FastAPI(
         title="IncidentLens API",
-        version="0.4.0",
+        version="0.5.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.add_middleware(
@@ -119,6 +119,18 @@ def create_app(
 
     runner = require_role(settings, "runner", "admin")
     admin = require_role(settings, "admin")
+
+    def visible_investigation(
+        investigation_id: str,
+        principal: Principal,
+    ) -> dict[str, object]:
+        value = store.get(
+            investigation_id,
+            owner_actor=None if principal.role == "admin" else principal.actor,
+        )
+        if value is None:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        return value
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
@@ -227,6 +239,7 @@ def create_app(
             record, created = store.create_idempotent(
                 case.id,
                 payload.mode,
+                owner_actor=principal.actor,
                 idempotency_key=idempotency_key,
                 request_fingerprint=request_fingerprint,
             )
@@ -292,7 +305,7 @@ def create_app(
 
     @app.get("/api/v1/investigations")
     def list_investigations(
-        _principal: Principal = Depends(runner),
+        principal: Principal = Depends(runner),
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
         status_filter: Annotated[str | None, Query(alias="status", max_length=30)] = None,
@@ -303,6 +316,7 @@ def create_app(
             offset=offset,
             status=status_filter,
             case_id=case_id,
+            owner_actor=None if principal.role == "admin" else principal.actor,
         )
 
     @app.get("/api/v1/audit-events")
@@ -323,12 +337,9 @@ def create_app(
     @app.get("/api/v1/investigations/{investigation_id}")
     def get_investigation(
         investigation_id: str,
-        _principal: Principal = Depends(runner),
+        principal: Principal = Depends(runner),
     ) -> dict[str, object]:
-        value = store.get(investigation_id)
-        if value is None:
-            raise HTTPException(status_code=404, detail="Investigation not found")
-        return value
+        return visible_investigation(investigation_id, principal)
 
     @app.post(
         "/api/v1/investigations/{investigation_id}/stream-ticket",
@@ -339,6 +350,7 @@ def create_app(
         investigation_id: str,
         principal: Principal = Depends(runner),
     ) -> StreamTicket:
+        visible_investigation(investigation_id, principal)
         expires_at = datetime.now(UTC) + timedelta(minutes=5)
         try:
             ticket = store.issue_stream_ticket(
@@ -380,6 +392,9 @@ def create_app(
             while True:
                 if await request.is_disconnected():
                     return
+                current = store.get(investigation_id)
+                if current is None:
+                    return
                 events = store.events_after(investigation_id, cursor)
                 for event in events:
                     cursor = int(event["sequence"])
@@ -388,8 +403,7 @@ def create_app(
                         "event": str(event["type"]),
                         "data": json.dumps(event, ensure_ascii=False),
                     }
-                current = store.get(investigation_id)
-                if current is None or (current["status"] in terminal and not events):
+                if current["status"] in terminal and not events:
                     return
                 await asyncio.sleep(0.2)
 
@@ -399,7 +413,11 @@ def create_app(
     def cancel_investigation(
         investigation_id: str, principal: Principal = Depends(runner)
     ) -> dict[str, str]:
-        if not store.cancel(investigation_id):
+        visible_investigation(investigation_id, principal)
+        if not store.cancel(
+            investigation_id,
+            owner_actor=None if principal.role == "admin" else principal.actor,
+        ):
             raise HTTPException(status_code=409, detail="Investigation cannot be canceled")
         store.record_audit(
             actor=principal.actor,

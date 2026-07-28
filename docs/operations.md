@@ -26,6 +26,12 @@ only; refreshing or leaving the page clears it.
 Runner live-run usage is stored in `daily_run_usage`, keyed by UTC date and a
 one-way token digest. Restarting the API does not reset the daily limit.
 
+Runner credentials can list, read, stream and cancel only investigations owned
+by their actor name. Administrator credentials can inspect every investigation.
+The v0.5 ownership migration derives existing owners from
+`investigation.created` audit events; legacy rows without that audit evidence
+are intentionally visible only to administrators.
+
 Stream tickets live for five minutes and are scoped to one investigation.
 `investigation_stream_tickets` stores only their SHA-256 digests. Ticket
 issuance is recorded as `investigation.stream_ticket_issued` without the raw
