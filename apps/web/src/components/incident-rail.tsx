@@ -1,4 +1,13 @@
-import { Activity, Box, Database, RadioTower, Upload, X } from "lucide-react";
+import {
+  Activity,
+  Box,
+  Database,
+  LockKeyhole,
+  RadioTower,
+  UnlockKeyhole,
+  Upload,
+  X,
+} from "lucide-react";
 import { FormEvent, useState } from "react";
 
 import type { IncidentCase } from "@/lib/types";
@@ -15,6 +24,76 @@ interface IncidentRailProps {
   onSelect: (id: string) => void;
   loading: boolean;
   onImportIncident?: (file: File, adminToken: string) => Promise<void>;
+  onUnlockCatalog?: (token: string) => Promise<void>;
+  catalogUnlocked?: boolean;
+}
+
+function CatalogAccessDialog({
+  onClose,
+  onUnlock,
+}: {
+  onClose: () => void;
+  onUnlock: (token: string) => Promise<void>;
+}) {
+  const [token, setToken] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      await onUnlock(token);
+      onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法加载私有事故目录");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="dialog-scrim" onMouseDown={onClose}>
+      <form
+        className="live-dialog catalog-dialog"
+        onSubmit={submit}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span className="eyebrow">Private catalog</span>
+            <h2>打开私有目录</h2>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label="关闭私有目录登录"
+          >
+            <X size={18} />
+          </button>
+        </header>
+        <p>
+          使用 Runner 或 Admin 令牌读取导入的生产事故。令牌仅保留在当前页面内存中，刷新后会清除。
+        </p>
+        <label htmlFor="incident-catalog-token">Runner / Admin 令牌</label>
+        <input
+          id="incident-catalog-token"
+          type="password"
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+          placeholder="输入访问令牌"
+          autoComplete="off"
+          required
+        />
+        {error && <p className="form-error">{error}</p>}
+        <button className="run-button" disabled={!token || submitting}>
+          {submitting ? "正在验证" : "加载私有事故"}
+        </button>
+      </form>
+    </div>
+  );
 }
 
 function ImportIncidentDialog({
@@ -92,8 +171,11 @@ export function IncidentRail({
   onSelect,
   loading,
   onImportIncident,
+  onUnlockCatalog,
+  catalogUnlocked = false,
 }: IncidentRailProps) {
   const [showImport, setShowImport] = useState(false);
+  const [showCatalog, setShowCatalog] = useState(false);
   return (
     <aside className="incident-rail" aria-label="事故演练列表">
       <div className="rail-heading">
@@ -128,10 +210,27 @@ export function IncidentRail({
         })}
       </div>
 
-      {onImportIncident && (
-        <button className="rail-import-button" onClick={() => setShowImport(true)}>
-          <Upload size={14} />导入事故包
-        </button>
+      {(onImportIncident || onUnlockCatalog) && (
+        <div className="rail-actions">
+          {onUnlockCatalog && (
+            <button
+              className={`rail-catalog-button ${catalogUnlocked ? "unlocked" : ""}`}
+              onClick={() => setShowCatalog(true)}
+            >
+              {catalogUnlocked ? (
+                <UnlockKeyhole size={14} />
+              ) : (
+                <LockKeyhole size={14} />
+              )}
+              {catalogUnlocked ? "私有目录已解锁" : "打开私有目录"}
+            </button>
+          )}
+          {onImportIncident && (
+            <button className="rail-import-button" onClick={() => setShowImport(true)}>
+              <Upload size={14} />导入事故包
+            </button>
+          )}
+        </div>
       )}
 
       <div className="rail-note">
@@ -142,6 +241,12 @@ export function IncidentRail({
         <ImportIncidentDialog
           onClose={() => setShowImport(false)}
           onImport={onImportIncident}
+        />
+      )}
+      {showCatalog && onUnlockCatalog && (
+        <CatalogAccessDialog
+          onClose={() => setShowCatalog(false)}
+          onUnlock={onUnlockCatalog}
         />
       )}
     </aside>

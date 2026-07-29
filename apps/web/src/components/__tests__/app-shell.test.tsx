@@ -183,4 +183,33 @@ describe("AppShell", () => {
     expect(mockedApi.replay).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "实时调查" })).toBeEnabled();
   });
+
+  it("loads private incidents only after an explicit catalog unlock", async () => {
+    const user = userEvent.setup();
+    const privateIncident = {
+      ...incident,
+      id: "private-case",
+      title: "Private production incident",
+      replay_available: false,
+    };
+    mockedApi.incidents
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident, privateIncident]);
+
+    renderApp();
+
+    expect(
+      await screen.findByRole("heading", { name: "Checkout latency" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Private production incident")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "打开私有目录" }));
+    await user.type(
+      screen.getByLabelText("Runner / Admin 令牌"),
+      "runner-token",
+    );
+    await user.click(screen.getByRole("button", { name: "加载私有事故" }));
+
+    expect(await screen.findByText("Private production incident")).toBeInTheDocument();
+    expect(mockedApi.incidents).toHaveBeenLastCalledWith("runner-token");
+  });
 });

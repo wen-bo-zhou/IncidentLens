@@ -39,7 +39,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  incidents: () => request<IncidentCase[]>("/api/v1/incidents"),
+  incidents: (token?: string) =>
+    request<IncidentCase[]>(
+      "/api/v1/incidents",
+      token
+        ? { headers: { Authorization: `Bearer ${token}` } }
+        : undefined,
+    ),
   importIncident: (file: File, adminToken: string) => {
     const body = new FormData();
     body.append("file", file);

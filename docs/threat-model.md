@@ -17,6 +17,7 @@
 - Constant-time credential checks, named audit principals and production rejection of demo, weak or duplicate credentials.
 - Exact-origin credentialed CORS and `no-store` on authenticated responses.
 - Owner-scoped Runner history, report access, stream-ticket issuance, cancellation and idempotency keys; administrators retain global access.
+- Imported incidents are excluded from anonymous catalog/detail responses and the public replay cache across restarts; Runner/Admin credentials are required to discover them.
 - Idempotent request/result persistence, durable audit events and one-time remediation state transition.
 
 SSE tickets travel in the event-stream query string because browser

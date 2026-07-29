@@ -20,11 +20,21 @@ only; refreshing or leaving the page clears it.
 - Stream ticket: `POST /api/v1/investigations/{id}/stream-ticket` (runner or admin)
 - Event stream: `GET /api/v1/investigations/{id}/events?ticket=...`
 - Audit history: `GET /api/v1/audit-events` (admin only)
+- Incident catalog: `GET /api/v1/incidents` (anonymous built-in demos;
+  Runner/Admin credentials additionally reveal imported incidents)
+- Incident detail: `GET /api/v1/incidents/{case_id}` (anonymous built-in
+  demos; imported incidents require Runner/Admin)
 - Both endpoints accept `limit` and `offset`; investigations also accept
   `status` and `case_id`, while audit events accept `action` and `resource_id`.
 
 Runner live-run usage is stored in `daily_run_usage`, keyed by UTC date and a
 one-way token digest. Restarting the API does not reset the daily limit.
+
+Imported incident packages are always private and live-only, even if their
+package metadata says `visibility=showcase`. They are excluded from anonymous
+catalog responses and the replay cache before and after API restarts. The
+investigation console's private-catalog credential is used for one catalog
+request and is not persisted in browser storage.
 
 Runner credentials can list, read, stream and cancel only investigations owned
 by their actor name. Administrator credentials can inspect every investigation.

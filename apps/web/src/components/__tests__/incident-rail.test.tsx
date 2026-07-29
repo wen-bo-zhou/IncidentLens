@@ -5,6 +5,33 @@ import { describe, expect, it, vi } from "vitest";
 import { IncidentRail } from "@/components/incident-rail";
 
 describe("IncidentRail", () => {
+  it("unlocks the private catalog with a runner or admin credential", async () => {
+    const user = userEvent.setup();
+    const unlockCatalog = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IncidentRail
+        incidents={[]}
+        onSelect={vi.fn()}
+        loading={false}
+        onUnlockCatalog={unlockCatalog}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "打开私有目录" }));
+    await user.type(
+      screen.getByLabelText("Runner / Admin 令牌"),
+      "runner-token",
+    );
+    await user.click(screen.getByRole("button", { name: "加载私有事故" }));
+
+    await waitFor(() =>
+      expect(unlockCatalog).toHaveBeenCalledWith("runner-token"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Runner / Admin 令牌")).not.toBeInTheDocument(),
+    );
+  });
+
   it("submits a JSON incident pack with an explicit admin token", async () => {
     const user = userEvent.setup();
     const importIncident = vi.fn().mockResolvedValue(undefined);

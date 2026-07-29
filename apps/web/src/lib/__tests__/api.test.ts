@@ -14,6 +14,22 @@ describe("api", () => {
     vi.unstubAllGlobals();
   });
 
+  it("uses an explicit credential when reading the private incident catalog", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.incidents("runner-token");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/incidents",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer runner-token",
+        }),
+      }),
+    );
+  });
+
   it("sends the selected UTC window when creating an investigation", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({

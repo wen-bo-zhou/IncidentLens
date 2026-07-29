@@ -11,11 +11,13 @@ ARTIFACTS = ROOT / "artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
 RUNNER_TOKEN = os.getenv("E2E_RUNNER_TOKEN", "runner-demo-token")
 ADMIN_TOKEN = os.getenv("E2E_ADMIN_TOKEN", "admin-demo-token")
+BROWSER_CHANNEL = os.getenv("E2E_BROWSER_CHANNEL", "chromium")
 
 
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch(headless=True, channel="chromium")
+    browser = playwright.chromium.launch(headless=True, channel=BROWSER_CHANNEL)
     page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+    page.set_default_navigation_timeout(60_000)
     console_errors: list[str] = []
     http_errors: list[str] = []
     page.on(
@@ -55,7 +57,14 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="实时调查").click()
     page.get_by_label("Runner 令牌").fill(RUNNER_TOKEN)
     page.get_by_role("button", name="确认启动").click()
-    page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
+    try:
+        page.get_by_text("completed", exact=True).wait_for(timeout=15_000)
+    except Exception:
+        page.screenshot(path=ARTIFACTS / "incidentlens-live-failure.png", full_page=True)
+        print("LIVE BODY:\n", ascii(page.locator("body").inner_text()))
+        print("CONSOLE ERRORS:\n", ascii(console_errors))
+        print("HTTP ERRORS:\n", ascii(http_errors))
+        raise
     page.get_by_role("button", name="需要管理员审批").click()
     page.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
     page.get_by_role("button", name="批准并模拟").click()
@@ -105,6 +114,7 @@ with sync_playwright() as playwright:
         print("CONSOLE ERRORS:\n", ascii(console_errors))
         print("HTTP ERRORS:\n", ascii(http_errors))
         raise
+    page.get_by_role("button", name="私有目录已解锁").wait_for()
     page.get_by_role("button", name="实时调查").click()
     assert page.get_by_label("开始时间（UTC）").input_value() == "2026-07-27T09:00"
     assert page.get_by_label("结束时间（UTC）").input_value() == "2026-07-27T10:00"
@@ -113,6 +123,16 @@ with sync_playwright() as playwright:
     page.get_by_text("inconclusive", exact=True).wait_for(timeout=15_000)
     page.get_by_role("heading", name="证据不足，无法判定根因").wait_for()
     page.screenshot(path=ARTIFACTS / "incidentlens-inconclusive.png", full_page=True)
+
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    assert page.get_by_text("浏览器导入的待调查事故", exact=True).count() == 0
+    page.get_by_role("button", name="打开私有目录").click()
+    page.get_by_label("Runner / Admin 令牌").fill(RUNNER_TOKEN)
+    page.get_by_role("button", name="加载私有事故").click()
+    page.get_by_text("浏览器导入的待调查事故", exact=True).click()
+    page.get_by_role("heading", name="浏览器导入的待调查事故").wait_for()
+    page.screenshot(path=ARTIFACTS / "incidentlens-private-catalog.png", full_page=True)
 
     page.get_by_role("button", name=re.compile("库存服务连接池耗尽")).click()
     page.get_by_role("heading", name="库存服务连接池耗尽").wait_for()
@@ -154,6 +174,7 @@ with sync_playwright() as playwright:
     browser.close()
 
 print(
-    "E2E smoke passed: dashboard, import, bounded live SSE, inconclusive handling, "
-    "metric/trace evidence, sandbox approval, evaluations, operations ledger, mobile"
+    "E2E smoke passed: dashboard, private import catalog, bounded live SSE, "
+    "inconclusive handling, metric/trace evidence, sandbox approval, evaluations, "
+    "operations ledger, mobile"
 )

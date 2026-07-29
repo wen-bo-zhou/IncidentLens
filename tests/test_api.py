@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -55,7 +56,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.5.0"
+    assert response.json()["info"]["version"] == "0.6.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -600,14 +601,72 @@ def test_admin_can_import_valid_incident_pack() -> None:
     assert response.status_code == 201
     assert response.json()["id"] == "customer-imported-showcase"
     assert response.json()["replay_available"] is False
-    detail = client.get("/api/v1/incidents/customer-imported-showcase")
-    assert detail.status_code == 200
-    assert "ground_truth" not in detail.json()
+    public_list = client.get("/api/v1/incidents")
+    public_detail = client.get("/api/v1/incidents/customer-imported-showcase")
+    private_list = client.get(
+        "/api/v1/incidents",
+        headers={"Authorization": "Bearer runner-demo-token"},
+    )
+    private_detail = client.get(
+        "/api/v1/incidents/customer-imported-showcase",
+        headers={"Authorization": "Bearer runner-demo-token"},
+    )
+    invalid_credential = client.get(
+        "/api/v1/incidents",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+
+    assert "customer-imported-showcase" not in {
+        item["id"] for item in public_list.json()
+    }
+    assert public_detail.status_code == 404
+    assert "customer-imported-showcase" in {
+        item["id"] for item in private_list.json()
+    }
+    assert private_detail.status_code == 200
+    assert "ground_truth" not in private_detail.json()
+    assert invalid_credential.status_code == 403
     assert client.app.state.store.list_incidents()[0].id == "customer-imported-showcase"
     assert client.app.state.store.runbook_chunk_count("customer-imported-showcase") == 1
     assert client.app.state.store.audit_actions("customer-imported-showcase") == [
         "incident.imported"
     ]
+
+
+def test_imported_incident_stays_private_and_live_only_after_restart(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'catalog.db').as_posix()}",
+        task_mode="inline",
+        _env_file=None,
+    )
+    source = ScenarioRepository.seeded().get_case("deploy-timeout-showcase")
+    imported = source.model_copy(update={"id": "private-imported-incident"})
+    package = json.dumps(imported.model_dump(mode="json")).encode()
+
+    with TestClient(create_app(settings=settings)) as client:
+        response = client.post(
+            "/api/v1/incidents/import",
+            headers={"Authorization": "Bearer admin-demo-token"},
+            files={"file": ("incident.json", package, "application/json")},
+        )
+        assert response.status_code == 201
+
+    with TestClient(create_app(settings=settings)) as restarted:
+        public_ids = {item["id"] for item in restarted.get("/api/v1/incidents").json()}
+        private_detail = restarted.get(
+            "/api/v1/incidents/private-imported-incident",
+            headers=RUNNER_HEADERS,
+        )
+        public_replay = restarted.get(
+            "/api/v1/demo/replays/private-imported-incident"
+        )
+
+    assert "private-imported-incident" not in public_ids
+    assert private_detail.status_code == 200
+    assert private_detail.json()["replay_available"] is False
+    assert public_replay.status_code == 404
 
 
 def test_admin_can_import_and_investigate_an_unlabeled_incident_pack() -> None:

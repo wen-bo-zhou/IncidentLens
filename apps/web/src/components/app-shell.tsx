@@ -36,7 +36,13 @@ const streamedEventTypes: WorkflowEventType[] = [
 const terminalStatuses = new Set(["completed", "failed", "canceled", "inconclusive"]);
 
 export function AppShell() {
-  const incidentsQuery = useQuery({ queryKey: ["incidents"], queryFn: api.incidents });
+  const [privateIncidents, setPrivateIncidents] = useState<
+    Awaited<ReturnType<typeof api.incidents>>
+  >();
+  const incidentsQuery = useQuery({
+    queryKey: ["incidents", "public"],
+    queryFn: () => api.incidents(),
+  });
   const [chosenId, setChosenId] = useState<string>();
   const [liveReport, setLiveReport] = useState<InvestigationReport>();
   const [liveStatus, setLiveStatus] = useState<string>();
@@ -46,8 +52,9 @@ export function AppShell() {
   const liveCredentials = useRef<
     { investigationId: string; runnerToken: string } | undefined
   >(undefined);
-  const selectedId = chosenId ?? incidentsQuery.data?.[0]?.id;
-  const incident = incidentsQuery.data?.find((item) => item.id === selectedId);
+  const incidents = privateIncidents ?? incidentsQuery.data;
+  const selectedId = chosenId ?? incidents?.[0]?.id;
+  const incident = incidents?.find((item) => item.id === selectedId);
 
   const reportQuery = useQuery({
     queryKey: ["replay", selectedId],
@@ -179,8 +186,13 @@ export function AppShell() {
 
   async function importIncident(file: File, adminToken: string): Promise<void> {
     const imported = await api.importIncident(file, adminToken);
-    await incidentsQuery.refetch();
+    await unlockCatalog(adminToken);
     selectIncident(imported.id);
+  }
+
+  async function unlockCatalog(token: string): Promise<void> {
+    const incidents = await api.incidents(token);
+    setPrivateIncidents(incidents);
   }
 
   return (
@@ -200,11 +212,13 @@ export function AppShell() {
 
       <div className="shell-body">
         <IncidentRail
-          incidents={incidentsQuery.data ?? []}
+          incidents={incidents ?? []}
           selectedId={selectedId}
           onSelect={selectIncident}
           loading={incidentsQuery.isLoading}
           onImportIncident={importIncident}
+          onUnlockCatalog={unlockCatalog}
+          catalogUnlocked={privateIncidents !== undefined}
         />
         {incidentsQuery.error ? (
           <main className="connection-error">

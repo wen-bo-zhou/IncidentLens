@@ -24,7 +24,7 @@ from pydantic import BaseModel, model_validator
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
-from incidentlens.auth import Principal, require_role
+from incidentlens.auth import Principal, principal_from_header, require_role
 from incidentlens.config import Settings, get_settings
 from incidentlens.db import InvestigationStore, create_session_factory
 from incidentlens.evals import EvaluationRunner
@@ -80,10 +80,14 @@ def create_app(
             update={"database_url": "sqlite://", "task_mode": "inline"}
         )
     repository = ScenarioRepository.seeded()
+    public_cases = repository.list_cases()
+    public_case_ids = {case.id for case in public_cases}
+    persisted_case_ids: set[str] = set()
     session_factory = create_session_factory(settings.database_url, testing=testing)
     store = InvestigationStore(session_factory)
     for persisted_case in store.list_incidents():
         repository.add_case(persisted_case)
+        persisted_case_ids.add(persisted_case.id)
     engine = InvestigationEngine(
         model_client=build_model_client(
             base_url=settings.model_base_url,
@@ -97,11 +101,11 @@ def create_app(
         case.id: replay_engine.run(
             case, investigation_id=f"replay-{case.id}"
         ).report.model_dump(mode="json")
-        for case in repository.list_cases()
+        for case in public_cases
     }
     app = FastAPI(
         title="IncidentLens API",
-        version="0.5.0",
+        version="0.6.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.add_middleware(
@@ -119,6 +123,14 @@ def create_app(
 
     runner = require_role(settings, "runner", "admin")
     admin = require_role(settings, "admin")
+
+    def catalog_reader(
+        authorization: str | None = Header(default=None),
+    ) -> Principal:
+        principal = principal_from_header(authorization, settings)
+        if authorization is not None and principal.role == "guest":
+            raise HTTPException(status_code=403, detail="Invalid credential")
+        return principal
 
     def visible_investigation(
         investigation_id: str,
@@ -149,14 +161,29 @@ def create_app(
         return {"status": "ready"}
 
     @app.get("/api/v1/incidents")
-    def list_incidents() -> list[dict[str, object]]:
+    def list_incidents(
+        principal: Principal = Depends(catalog_reader),
+    ) -> list[dict[str, object]]:
+        case_ids = [case.id for case in public_cases]
+        if principal.role != "guest":
+            case_ids.extend(sorted(persisted_case_ids))
         return [
-            case.to_public(replay_available=case.id in replay_cache).model_dump(mode="json")
-            for case in repository.list_cases()
+            repository.get_case(case_id)
+            .to_public(replay_available=case_id in replay_cache)
+            .model_dump(mode="json")
+            for case_id in case_ids
         ]
 
     @app.get("/api/v1/incidents/{case_id}")
-    def get_incident(case_id: str) -> dict[str, object]:
+    def get_incident(
+        case_id: str,
+        principal: Principal = Depends(catalog_reader),
+    ) -> dict[str, object]:
+        allowed_case_ids = public_case_ids
+        if principal.role != "guest":
+            allowed_case_ids = public_case_ids | persisted_case_ids
+        if case_id not in allowed_case_ids:
+            raise HTTPException(status_code=404, detail="Incident case not found")
         try:
             case = repository.get_case(case_id)
             return case.to_public(
@@ -182,6 +209,7 @@ def create_app(
             package_hash = sha256(content).hexdigest()
             store.save_incident(case, package_hash)
             repository.add_case(case)
+            persisted_case_ids.add(case.id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         store.record_audit(
