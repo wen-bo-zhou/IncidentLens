@@ -55,6 +55,40 @@ demo credentials, credentials shorter than 32 characters, credentials reused
 across actors or roles, actor names reused across roles, unsafe actor names,
 and wildcard or non-origin CORS entries.
 
+For OIDC JWT federation, register IncidentLens as an API audience in the
+identity provider and configure exact trust values plus group mappings:
+
+```dotenv
+STATIC_AUTH_ENABLED=false
+OIDC_ISSUER=https://idp.example.com
+OIDC_AUDIENCE=incidentlens-api
+OIDC_JWKS_URL=https://idp.example.com/.well-known/jwks.json
+OIDC_GROUPS_CLAIM=groups
+OIDC_RUNNER_GROUPS=["incidentlens-runners"]
+OIDC_ADMIN_GROUPS=["incidentlens-admins"]
+```
+
+The API accepts only RS256-signed `at+jwt` access tokens containing `iss`,
+`sub`, `aud`, `iat`, `exp` and the configured top-level group claim. RSA
+verification keys must be at least 2048 bits. The JWKS document is limited to
+100 keys / 1 MB, streamed without compression under a three-second total fetch
+budget, cached for five minutes and protected by a 30-second refresh cooldown.
+Unrelated algorithm and encryption keys in a mixed provider JWKS are ignored;
+at least one safe RS256 verification key is required. Role mappings cannot
+overlap or reuse registered identity/security claims. Investigation ownership,
+audit actors and quota keys derive from a collision-resistant digest of the
+stable issuer/subject pair, so token refreshes and username changes do not
+create a new identity. The `oidc-` audit-actor namespace is reserved from static
+credential maps. When a required JWKS refresh fails or returns an unsafe key
+set, authenticated requests fail closed with HTTP 503 and `Retry-After: 30`;
+these infrastructure failures do not consume the per-client invalid-credential
+allowance.
+
+Leave `STATIC_AUTH_ENABLED=true` only when separately managed static
+credentials are required for break-glass access. The current web console
+accepts an IdP access token in its Runner/Admin token fields; interactive
+authorization-code login is a separate deployment/client concern.
+
 For one credential per role, set unique `RUNNER_TOKEN` and `ADMIN_TOKEN`
 values. For multiple operators, use JSON maps; a non-empty map replaces the
 single-token setting for that role:

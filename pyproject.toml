@@ -1,6 +1,6 @@
 [project]
 name = "incidentlens"
-version = "0.7.0"
+version = "0.8.0"
 description = "Evidence-first AI incident investigation assistant"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
   "prometheus-client>=0.21,<1",
   "psycopg[binary]>=3.2,<4",
   "pgvector>=0.3,<1",
+  "PyJWT[crypto]>=2.13,<3",
   "pydantic-settings>=2.7,<3",
   "python-multipart>=0.0.18,<1",
   "redis>=5.2,<7",

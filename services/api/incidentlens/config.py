@@ -10,6 +10,23 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 CredentialRole = Literal["runner", "admin"]
+_RESERVED_OIDC_ROLE_CLAIMS = {
+    "acr",
+    "amr",
+    "aud",
+    "auth_time",
+    "azp",
+    "client_id",
+    "exp",
+    "iat",
+    "iss",
+    "jti",
+    "nbf",
+    "nonce",
+    "scope",
+    "sid",
+    "sub",
+}
 
 
 def _is_strong_rate_limit_secret(value: str) -> bool:
@@ -41,6 +58,13 @@ class Settings(BaseSettings):
     trusted_proxy_cidrs: list[str] = Field(
         default_factory=lambda: ["127.0.0.0/8", "::1/128"]
     )
+    static_auth_enabled: bool = True
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
+    oidc_groups_claim: str = "groups"
+    oidc_runner_groups: list[str] = Field(default_factory=list)
+    oidc_admin_groups: list[str] = Field(default_factory=list)
     runner_token: SecretStr = SecretStr("runner-demo-token")
     admin_token: SecretStr = SecretStr("admin-demo-token")
     runner_credentials: dict[str, SecretStr] = Field(default_factory=dict)
@@ -60,6 +84,8 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Named credential actor must use 1-64 safe identifier characters"
                 )
+            if actor.startswith("oidc-"):
+                raise ValueError("The oidc- actor namespace is reserved")
         return value
 
     @field_validator("cors_origins")
@@ -93,23 +119,85 @@ class Settings(BaseSettings):
                 raise ValueError("Trusted proxies must be valid CIDR networks") from exc
         return value
 
+    @field_validator("oidc_groups_claim")
+    @classmethod
+    def validate_oidc_claim_names(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", value) is None:
+            raise ValueError("OIDC claim names must be safe top-level identifiers")
+        if value in _RESERVED_OIDC_ROLE_CLAIMS:
+            raise ValueError(
+                "OIDC security claims cannot be used for role mapping"
+            )
+        return value
+
+    @field_validator("oidc_runner_groups", "oidc_admin_groups")
+    @classmethod
+    def validate_oidc_groups(cls, value: list[str]) -> list[str]:
+        if any(not group.strip() or len(group) > 128 for group in value):
+            raise ValueError("OIDC role groups must contain 1-128 characters")
+        if len(value) != len(set(value)):
+            raise ValueError("OIDC role groups cannot contain duplicates")
+        return value
+
     @model_validator(mode="after")
-    def validate_credentials(self) -> Self:
-        runner = self.credentials_for("runner")
-        admin = self.credentials_for("admin")
-        if {actor for actor, _token in runner} & {
-            actor for actor, _token in admin
-        }:
-            raise ValueError("Credential actor names must be unique across roles")
-        values = [token for _actor, token in (*runner, *admin)]
-        if any(not token for token in values):
-            raise ValueError("Configured credentials cannot be empty")
-        if len(values) != len(set(values)):
-            raise ValueError("Every configured credential must be unique")
+    def validate_authentication(self) -> Self:
+        oidc_endpoints = (
+            self.oidc_issuer,
+            self.oidc_audience,
+            self.oidc_jwks_url,
+        )
+        oidc_configured = any(
+            (
+                *oidc_endpoints,
+                *self.oidc_runner_groups,
+                *self.oidc_admin_groups,
+            )
+        )
+        if oidc_configured and not all(oidc_endpoints):
+            raise ValueError(
+                "OIDC issuer, audience and JWKS URL must be configured together"
+            )
+        if self.oidc_enabled:
+            if not self.oidc_runner_groups and not self.oidc_admin_groups:
+                raise ValueError("OIDC requires at least one role group mapping")
+            if set(self.oidc_runner_groups) & set(self.oidc_admin_groups):
+                raise ValueError("OIDC Runner and Admin role groups cannot overlap")
+            for endpoint in (self.oidc_issuer, self.oidc_jwks_url):
+                parsed = urlsplit(endpoint)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError("OIDC endpoints must be absolute HTTP URLs")
+                if self.app_env == "production" and parsed.scheme != "https":
+                    raise ValueError("Production OIDC endpoints must use HTTPS")
+        if not self.static_auth_enabled and not self.oidc_enabled:
+            raise ValueError("Disabling static authentication requires OIDC")
+
+        values: list[str] = []
+        if self.static_auth_enabled:
+            runner = self.credentials_for("runner")
+            admin = self.credentials_for("admin")
+            if {actor for actor, _token in runner} & {
+                actor for actor, _token in admin
+            }:
+                raise ValueError("Credential actor names must be unique across roles")
+            values = [token for _actor, token in (*runner, *admin)]
+            if any(not token for token in values):
+                raise ValueError("Configured credentials cannot be empty")
+            if len(values) != len(set(values)):
+                raise ValueError("Every configured credential must be unique")
         if self.app_env == "production":
-            if {"runner-demo-token", "admin-demo-token"} & set(values):
+            if self.static_auth_enabled and {
+                "runner-demo-token",
+                "admin-demo-token",
+            } & set(values):
                 raise ValueError("Production cannot use demo credentials")
-            if any(len(token) < 32 for token in values):
+            if self.static_auth_enabled and any(len(token) < 32 for token in values):
                 raise ValueError(
                     "Production credentials must contain at least 32 characters"
                 )
@@ -124,9 +212,15 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer and self.oidc_audience and self.oidc_jwks_url)
+
     def credentials_for(
         self, role: CredentialRole
     ) -> tuple[tuple[str, str], ...]:
+        if not self.static_auth_enabled:
+            return ()
         configured = (
             self.runner_credentials
             if role == "runner"

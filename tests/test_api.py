@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from incidentlens.app import create_app
+from incidentlens.auth import AuthenticationUnavailable, Principal
 from incidentlens.config import Settings
 from incidentlens.observability import redact_access_log_path
 from incidentlens.scenarios import ScenarioRepository
@@ -56,7 +57,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.7.0"
+    assert response.json()["info"]["version"] == "0.8.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -165,6 +166,100 @@ def test_invalid_credentials_are_rate_limited_per_forwarded_client() -> None:
     assert blocked.headers["Cache-Control"] == "no-store"
     assert other_client.status_code == 403
     assert valid.status_code == 200
+
+
+def test_oidc_runner_can_use_protected_routes_when_static_auth_is_disabled() -> None:
+    class Verifier:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def verify(self, token: str) -> Principal | None:
+            self.calls += 1
+            if token != "valid-oidc-access-token":
+                return None
+            return Principal(
+                role="runner",
+                actor="oidc-6e2977ae-user-123",
+                token_hash="stable-oidc-identity-hash",
+            )
+
+    settings = Settings(
+        static_auth_enabled=False,
+        auth_failure_limit=1,
+        oidc_issuer="https://idp.example.com",
+        oidc_audience="incidentlens-api",
+        oidc_jwks_url="https://idp.example.com/jwks",
+        oidc_runner_groups=["incidentlens-runners"],
+        _env_file=None,
+    )
+    verifier = Verifier()
+    client = TestClient(
+        create_app(
+            testing=True,
+            settings=settings,
+            oidc_verifier=verifier,
+        )
+    )
+
+    created = client.post(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer valid-oidc-access-token"},
+        json={
+            "incident_case_id": "deploy-timeout-showcase",
+            "mode": "replay",
+        },
+    )
+    legacy = client.get(
+        "/api/v1/investigations",
+        headers=RUNNER_HEADERS,
+    )
+    history = client.get(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer valid-oidc-access-token"},
+    )
+
+    assert created.status_code == 202
+    assert legacy.status_code == 403
+    assert history.status_code == 200
+    assert history.json()["total"] == 1
+    assert verifier.calls == 3
+
+
+def test_oidc_jwks_outage_returns_service_unavailable_without_rate_limiting() -> None:
+    class UnavailableVerifier:
+        def verify(self, token: str) -> Principal | None:
+            raise AuthenticationUnavailable
+
+    settings = Settings(
+        static_auth_enabled=False,
+        auth_failure_limit=1,
+        oidc_issuer="https://idp.example.com",
+        oidc_audience="incidentlens-api",
+        oidc_jwks_url="https://idp.example.com/jwks",
+        oidc_runner_groups=["incidentlens-runners"],
+        _env_file=None,
+    )
+    client = TestClient(
+        create_app(
+            testing=True,
+            settings=settings,
+            oidc_verifier=UnavailableVerifier(),
+        ),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer syntactically-valid-jwt"},
+    )
+    repeated = client.get(
+        "/api/v1/investigations",
+        headers={"Authorization": "Bearer syntactically-valid-jwt"},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "30"
+    assert repeated.status_code == 503
 
 
 def test_runner_access_is_scoped_to_the_investigation_owner() -> None:

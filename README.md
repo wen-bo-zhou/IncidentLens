@@ -16,6 +16,7 @@ Evidence-first AI production incident investigation assistant. It correlates log
 - Runner-owned investigation access with administrator-wide operational visibility and identity-scoped idempotency.
 - Private imported-incident catalog: anonymous users see only built-in demos; Runner/Admin credentials unlock imported cases without creating public replays.
 - Durable per-client authentication-failure throttling with trusted-proxy parsing, HMAC identifiers and `Retry-After` responses.
+- Optional OIDC JWT federation with strict issuer/audience validation, cached JWKS rotation and IdP-group-to-role mapping.
 - Next.js incident console, causal-spine timeline, evidence dialog and evaluation console.
 - Prometheus metrics, OpenTelemetry spans, Docker Compose and optional Grafana/Tempo profile.
 - Deterministic one-shot baseline versus Agent evaluation, Markdown export and admin-approved sandbox simulation.
@@ -64,6 +65,14 @@ For a public deployment, set `APP_ENV=production` and either replace
 provide JSON maps through `RUNNER_CREDENTIALS` and `ADMIN_CREDENTIALS`. Named
 credentials appear as actors in the audit ledger. Set `CORS_ORIGINS` to a JSON
 array of exact browser origins; wildcard origins are rejected.
+
+Enterprise identity providers can issue API access tokens instead. Configure
+`OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL` and JSON arrays in
+`OIDC_RUNNER_GROUPS` / `OIDC_ADMIN_GROUPS`. Tokens must be RS256-signed
+`at+jwt` access tokens with matching issuer, audience, expiry and group claims.
+Set `STATIC_AUTH_ENABLED=false` to remove the legacy token path, or leave it
+enabled for separately managed break-glass credentials. Existing token fields
+in the web console accept a valid IdP access token and retain it only in memory.
 
 Authentication failures are limited per client across API instances using the
 database-backed fixed window. Production requires a unique

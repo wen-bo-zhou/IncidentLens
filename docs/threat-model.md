@@ -15,6 +15,7 @@
 - Guest replay, runner quota and admin-only import/evaluation/approval.
 - Runner/admin authorization for live reports; short-lived, investigation-scoped SSE tickets persisted only as SHA-256 digests.
 - Constant-time credential checks, named audit principals and production rejection of demo, weak or duplicate credentials.
+- OIDC access tokens require RS256, `at+jwt`, exact issuer/audience/time validation, streamed and cached JWKS, 2048-bit keys, collision-resistant `(iss, sub)` identities and explicit non-overlapping group-to-role mappings.
 - Exact-origin credentialed CORS and `no-store` on authenticated responses.
 - Owner-scoped Runner history, report access, stream-ticket issuance, cancellation and idempotency keys; administrators retain global access.
 - Imported incidents are excluded from anonymous catalog/detail responses and the public replay cache across restarts; Runner/Admin credentials are required to discover them.

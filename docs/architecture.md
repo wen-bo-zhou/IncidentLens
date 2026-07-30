@@ -25,6 +25,20 @@ the selected name becomes the durable audit actor while quota keys remain
 one-way token digests. Production startup rejects demo, short or duplicate
 credentials and accepts only an explicit exact-origin CORS allowlist.
 
+Optional OIDC federation validates RS256 `at+jwt` access tokens against an
+explicit issuer, audience and JWKS endpoint. JWKS responses are streamed with a
+1 MB limit, compression is refused, fetches have a three-second total budget,
+and safe keys are cached for five minutes. Refreshes occur no more than once
+every 30 seconds, including during upstream failure. Mixed-provider key sets
+may contain unrelated algorithms or encryption keys, but at least one
+2048-bit-or-stronger RS256 verification key is required. Exact IdP group
+mappings select Runner or Admin; authorization, ownership and daily quota
+identity use a collision-resistant digest of the stable `(iss, sub)` pair
+rather than mutable usernames or individual access-token hashes. Static
+credentials can be disabled completely when OIDC is configured. An unavailable
+or malformed JWKS source fails closed with HTTP 503 and `Retry-After` without
+charging the client's invalid-credential limit.
+
 Invalid supplied credentials pass through a database-backed fixed-window
 limiter before route dispatch. Client addresses are derived from
 `X-Forwarded-For` only when the direct peer belongs to `TRUSTED_PROXY_CIDRS`;

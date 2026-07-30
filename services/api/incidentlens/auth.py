@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import ip_address, ip_network
 from secrets import compare_digest
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import Header, HTTPException
 from starlette.requests import Request
@@ -13,11 +13,19 @@ from incidentlens.config import Settings
 Role = Literal["guest", "runner", "admin"]
 
 
+class AuthenticationUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class Principal:
     role: Role
     actor: str
     token_hash: str | None = None
+
+
+class BearerTokenVerifier(Protocol):
+    def verify(self, token: str) -> Principal | None: ...
 
 
 def client_ip_from_request(
@@ -57,7 +65,10 @@ def client_ip_from_request(
 
 
 def principal_from_header(
-    authorization: str | None, settings: Settings
+    authorization: str | None,
+    settings: Settings,
+    *,
+    oidc_verifier: BearerTokenVerifier | None = None,
 ) -> Principal:
     if not authorization or not authorization.startswith("Bearer "):
         return Principal(role="guest", actor="guest")
@@ -73,16 +84,52 @@ def principal_from_header(
                     actor=actor,
                     token_hash=sha256(token.encode("utf-8")).hexdigest(),
                 )
+    if oidc_verifier is not None:
+        principal = oidc_verifier.verify(token)
+        if principal is not None:
+            return principal
     return Principal(role="guest", actor="guest")
 
 
+def principal_from_request(
+    request: Request,
+    authorization: str | None,
+    settings: Settings,
+    *,
+    oidc_verifier: BearerTokenVerifier | None = None,
+) -> Principal:
+    cached = getattr(request.state, "principal", None)
+    if isinstance(cached, Principal):
+        return cached
+    return principal_from_header(
+        authorization,
+        settings,
+        oidc_verifier=oidc_verifier,
+    )
+
+
 def require_role(
-    settings: Settings, *allowed: Role
-) -> Callable[[str | None], Principal]:
+    settings: Settings,
+    *allowed: Role,
+    oidc_verifier: BearerTokenVerifier | None = None,
+) -> Callable[..., Principal]:
     def dependency(
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> Principal:
-        principal = principal_from_header(authorization, settings)
+        try:
+            principal = principal_from_request(
+                request,
+                authorization,
+                settings,
+                oidc_verifier=oidc_verifier,
+            )
+        except AuthenticationUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Authentication service unavailable",
+                headers={"Retry-After": "30"},
+            ) from exc
         if principal.role not in allowed:
             raise HTTPException(status_code=403, detail="Insufficient role")
         return principal

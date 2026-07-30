@@ -28,9 +28,12 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.concurrency import run_in_threadpool
 
 from incidentlens.auth import (
+    AuthenticationUnavailable,
+    BearerTokenVerifier,
     Principal,
     client_ip_from_request,
     principal_from_header,
+    principal_from_request,
     require_role,
 )
 from incidentlens.config import Settings, get_settings
@@ -38,6 +41,7 @@ from incidentlens.db import InvestigationStore, create_session_factory
 from incidentlens.evals import EvaluationRunner
 from incidentlens.model_client import build_model_client
 from incidentlens.observability import configure_observability
+from incidentlens.oidc import OidcTokenVerifier
 from incidentlens.scenarios import ScenarioRepository
 from incidentlens.schemas import IncidentCase
 from incidentlens.workflow import InvestigationEngine
@@ -72,6 +76,7 @@ def create_app(
     *,
     testing: bool = False,
     settings: Settings | None = None,
+    oidc_verifier: BearerTokenVerifier | None = None,
 ) -> FastAPI:
     if settings is None:
         settings = (
@@ -111,15 +116,23 @@ def create_app(
         ).report.model_dump(mode="json")
         for case in public_cases
     }
+    active_oidc_verifier = oidc_verifier
+    owned_oidc_verifier: OidcTokenVerifier | None = None
+    if active_oidc_verifier is None and settings.oidc_enabled:
+        owned_oidc_verifier = OidcTokenVerifier(settings)
+        active_oidc_verifier = owned_oidc_verifier
     app = FastAPI(
         title="IncidentLens API",
-        version="0.7.0",
+        version="0.8.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.state.repository = repository
     app.state.store = store
     app.state.settings = settings
     app.state.replay_cache = replay_cache
+    app.state.oidc_verifier = active_oidc_verifier
+    if owned_oidc_verifier is not None:
+        app.router.add_event_handler("shutdown", owned_oidc_verifier.close)
 
     @app.middleware("http")
     async def throttle_invalid_credentials(
@@ -127,36 +140,48 @@ def create_app(
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         authorization = request.headers.get("authorization")
-        if (
-            authorization is not None
-            and principal_from_header(authorization, settings).role == "guest"
-        ):
-            client_ip = client_ip_from_request(
-                request,
-                settings.trusted_proxy_cidrs,
-            )
-            subject_hash = hmac.new(
-                settings.rate_limit_secret.get_secret_value().encode(),
-                f"auth-failure:{client_ip}".encode(),
-                sha256,
-            ).hexdigest()
-            allowed, retry_after = await run_in_threadpool(
-                store.consume_auth_failure,
-                subject_hash,
-                now=datetime.now(UTC),
-                window_seconds=settings.auth_failure_window_seconds,
-                limit=settings.auth_failure_limit,
-            )
-            if not allowed:
-                return JSONResponse(
-                    status_code=429,
-                    content={"detail": "Too many authentication failures"},
-                    headers={"Retry-After": str(retry_after)},
+        if authorization is not None:
+            try:
+                principal = await run_in_threadpool(
+                    principal_from_header,
+                    authorization,
+                    settings,
+                    oidc_verifier=active_oidc_verifier,
                 )
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Invalid credential"},
-            )
+            except AuthenticationUnavailable:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "Authentication service unavailable"},
+                    headers={"Retry-After": "30"},
+                )
+            request.state.principal = principal
+            if principal.role == "guest":
+                client_ip = client_ip_from_request(
+                    request,
+                    settings.trusted_proxy_cidrs,
+                )
+                subject_hash = hmac.new(
+                    settings.rate_limit_secret.get_secret_value().encode(),
+                    f"auth-failure:{client_ip}".encode(),
+                    sha256,
+                ).hexdigest()
+                allowed, retry_after = await run_in_threadpool(
+                    store.consume_auth_failure,
+                    subject_hash,
+                    now=datetime.now(UTC),
+                    window_seconds=settings.auth_failure_window_seconds,
+                    limit=settings.auth_failure_limit,
+                )
+                if not allowed:
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "Too many authentication failures"},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Invalid credential"},
+                )
         return await call_next(request)
 
     app.add_middleware(
@@ -168,13 +193,28 @@ def create_app(
     )
     telemetry = configure_observability(app)
 
-    runner = require_role(settings, "runner", "admin")
-    admin = require_role(settings, "admin")
+    runner = require_role(
+        settings,
+        "runner",
+        "admin",
+        oidc_verifier=active_oidc_verifier,
+    )
+    admin = require_role(
+        settings,
+        "admin",
+        oidc_verifier=active_oidc_verifier,
+    )
 
     def catalog_reader(
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> Principal:
-        principal = principal_from_header(authorization, settings)
+        principal = principal_from_request(
+            request,
+            authorization,
+            settings,
+            oidc_verifier=active_oidc_verifier,
+        )
         if authorization is not None and principal.role == "guest":
             raise HTTPException(status_code=403, detail="Invalid credential")
         return principal
