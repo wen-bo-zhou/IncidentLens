@@ -19,7 +19,34 @@ from incidentlens.oidc import OidcTokenVerifier
 
 _MAX_TOKEN_RESPONSE_BYTES = 1_000_000
 _MAX_TOKEN_BYTES = 16_384
+_MAX_TOKEN_RESPONSE_JSON_DEPTH = 64
 _TOKEN_RESPONSE_TOTAL_DEADLINE_SECONDS = 5.0
+
+
+def _json_nesting_is_bounded(document: bytes | bytearray) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for value in document:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif value == ord("\\"):
+                escaped = True
+            elif value == ord('"'):
+                in_string = False
+            continue
+        if value == ord('"'):
+            in_string = True
+        elif value in (ord("{"), ord("[")):
+            depth += 1
+            if depth > _MAX_TOKEN_RESPONSE_JSON_DEPTH:
+                return False
+        elif value in (ord("}"), ord("]")):
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and not in_string
 
 
 class OidcExchangeError(ValueError):
@@ -206,6 +233,8 @@ class OidcBrowserClient:
                     raise AuthenticationUnavailable
         except httpx.HTTPError as exc:
             raise AuthenticationUnavailable from exc
+        if not _json_nesting_is_bounded(content):
+            raise AuthenticationUnavailable
         try:
             payload = json.loads(content)
         except (json.JSONDecodeError, RecursionError, UnicodeDecodeError) as exc:

@@ -559,6 +559,7 @@ def test_browser_oidc_exchanges_code_and_validates_both_tokens() -> None:
                 "expires_in": 420,
                 "id_token": id_token,
                 "refresh_token": "must-not-be-persisted",
+                "ignored": "[" * 100,
             }
         ).encode()
         return httpx.Response(
@@ -650,7 +651,7 @@ def test_browser_oidc_treats_deeply_nested_token_json_as_unavailable() -> None:
     from incidentlens.oidc_browser import OidcBrowserClient
 
     settings = _browser_settings()
-    document = b'{"value":' + b"[" * 5_000 + b"]" * 5_000 + b"}"
+    document = b'{"value":' + b"[" * 100 + b"]" * 100 + b"}"
 
     def deeply_nested(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=httpx.ByteStream(document))
