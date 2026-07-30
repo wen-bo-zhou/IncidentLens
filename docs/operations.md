@@ -1,5 +1,115 @@
 # Operations runbook / 运维手册
 
+## 项目状态与剩余事项
+
+IncidentLens `v1.0.0` 的完整 MVP 开发已经完成。当前版本已经具备事故导入、
+回放与实时调查、证据关联根因分析、Runner/Admin 权限隔离、企业 OIDC
+登录、持久化调查历史、完整报告恢复、审计记录、评测、沙箱处置、指标和
+追踪能力。后端、前端、生产构建及 Compose smoke test 均由 CI 验证。
+
+如果暂时不上线，没有必须继续完成的开发任务。以下事项属于生产上线、
+运营准备或 MVP 之后的可选增强。
+
+### 上线前必须完成
+
+1. **确定部署方案**
+   - 选择云服务器或托管平台，确定域名、区域、预算和容量。
+   - 决定使用 Docker Compose、托管容器，还是分别部署 Web、API 和 Worker。
+
+2. **准备生产基础设施**
+   - 部署 PostgreSQL、Redis、API、Celery Worker、Next.js Web 和 HTTPS
+     反向代理。
+   - Web 与 API 必须通过同一个公开 Origin 提供服务。
+
+3. **配置生产环境**
+   - 设置 `APP_ENV=production`、`DATABASE_URL`、`REDIS_URL`、
+     `CORS_ORIGINS`、`API_PROXY_TARGET`、`RATE_LIMIT_SECRET` 和
+     `TRUSTED_PROXY_CIDRS`。
+   - 所有密钥都应保存在部署平台的 Secret Manager 中，不得提交到 Git。
+
+4. **替换演示认证信息**
+   - 删除 `runner-demo-token` 和 `admin-demo-token`。
+   - 静态凭证必须唯一且不少于 32 个字符，不能跨角色或跨用户复用。
+   - 如果只允许企业登录，设置 `STATIC_AUTH_ENABLED=false`；如果保留
+     break-glass 入口，应单独管理、审计并定期轮换静态凭证。
+
+5. **配置域名和 HTTPS**
+   - 配置 DNS 和有效 TLS 证书。
+   - `CORS_ORIGINS` 必须使用精确 HTTPS Origin，禁止通配符。
+   - 确认公开回调地址和应用地址完全一致。
+
+6. **配置企业身份（启用 SSO 时）**
+   - 在 IdP 注册 OIDC confidential client 和 API audience。
+   - 配置 Issuer、Audience、JWKS URL、Client ID、Client Secret、
+     Runner/Admin 用户组及精确回调地址。
+   - 确认 Runner/Admin 组不重叠，并确定会话时长和紧急撤销流程。
+
+7. **初始化并保护生产数据库**
+   - 执行 Alembic migration。
+   - 上线前创建一次完整备份，并实际验证恢复。
+   - 制定自动备份、保留、加密和删除策略。
+
+8. **完成生产安全检查**
+   - 确认 API 及所有代理日志会隐藏 SSE `ticket`、OIDC `code` 和
+     `state`。
+   - 保持 Uvicorn `--no-proxy-headers`，并只信任实际入口代理网段。
+   - 验证 Runner 所有权隔离、Admin 全局权限、审计记录和凭证轮换。
+   - 制定浏览器会话撤销、管理员离职和 IdP Client Secret 泄漏处理流程。
+
+9. **执行上线验收**
+   - 重新运行后端测试、前端测试、静态检查、生产构建和 Compose smoke
+     test。
+   - 运行 `k6 run scripts/k6-smoke.js`。
+   - 导入一份经过脱敏的真实事故数据，验证 Runner、Admin、OIDC、审计、
+     报告恢复和取消流程。
+   - 如果启用正式模型，使用该模型重新运行隐藏评测门槛。
+
+10. **配置监控和报警**
+    - 监控 `/health/live`、`/health/ready`、`/metrics`、API 错误率、
+      Worker 队列、PostgreSQL、Redis、登录失败、限流、Runner 配额和
+      模型费用。
+    - 配置明确的报警接收人、值班安排和处置时限。
+
+### 推荐完成但不阻塞上线
+
+- 创建 `v1.0.0` Git tag、GitHub Release 和发行说明。
+- 为 `main` 启用分支保护，要求 CI 成功后才能合并。
+- 启用依赖漏洞、静态安全和密钥扫描。
+- 制定值班、故障响应、凭证轮换、审计复核和灾难恢复流程。
+- 定期演练数据库恢复，并设置日志、审计记录和事故数据保留期限。
+- 编写面向 Runner、Admin 和企业身份管理员的使用说明。
+- 安排一次真实用户验收并记录验收结果。
+
+### 启用模型时需要完成
+
+模型服务不是运行 MVP 的必要条件；不配置 `MODEL_API_KEY` 时可以免费使用
+确定性离线路径。如果启用外部模型：
+
+- 配置 `MODEL_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME` 和
+  `MAX_COST_CNY`。
+- 确认事故数据是否允许发送到该模型服务和所在区域。
+- 使用正式模型重新运行评测，确认质量、延迟和成本门槛。
+- 配置调用费用、失败率和延迟报警，并准备离线降级策略。
+
+### MVP 之后的可选增强
+
+- 直接连接 Prometheus、Loki、Elastic、Tempo、Jaeger、Kubernetes
+  和云厂商可观测性服务。
+- 集成 Slack、Teams、邮件、PagerDuty、Jira、Confluence 或 Notion。
+- 增加多租户、组织级隔离和更细粒度 RBAC。
+- 增加调查搜索、标签、收藏、批量导出和 PDF/Markdown 事故报告。
+- 增加数据保留和自动清理策略，以及更多语言和移动端体验优化。
+- 在现有沙箱模拟之外增加真实处置执行器、双人审批、变更窗口和自动回滚。
+- 扩展大规模性能、容灾、多区域部署和真实生产事故评测集。
+
+### 当前无需完成
+
+- 不需要继续补充 MVP 功能。
+- 不需要购买模型服务；离线路径不需要模型密钥。
+- 不需要管理员密码即可继续本地开发。
+- 不需要在本机安装 Docker；可以继续使用 SQLite、`uvicorn` 和 `pnpm`。
+  Docker 只在需要本地模拟完整生产栈时使用。
+
 ## Profiles and health
 
 `docker compose up --build` starts the core Web, API, Worker, PostgreSQL, Redis and Caddy services. `docker compose --profile observability up --build` additionally starts OpenTelemetry Collector, Prometheus, Tempo and Grafana.
