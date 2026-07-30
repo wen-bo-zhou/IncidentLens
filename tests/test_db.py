@@ -136,6 +136,40 @@ def test_daily_quota_is_durable_across_store_instances(tmp_path: Path) -> None:
     assert first_store.consume_daily_quota("different-runner", today, limit=2) is True
 
 
+def test_auth_failure_limit_is_shared_across_store_instances_and_windows(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'auth-failures.db').as_posix()}"
+    first_store = InvestigationStore(create_session_factory(database_url))
+    second_store = InvestigationStore(create_session_factory(database_url))
+    now = datetime(2026, 7, 30, 9, 0, 30, tzinfo=UTC)
+
+    assert first_store.consume_auth_failure(
+        "client-hash",
+        now=now,
+        window_seconds=300,
+        limit=2,
+    ) == (True, 270)
+    assert second_store.consume_auth_failure(
+        "client-hash",
+        now=now + timedelta(seconds=1),
+        window_seconds=300,
+        limit=2,
+    ) == (True, 269)
+    assert first_store.consume_auth_failure(
+        "client-hash",
+        now=now + timedelta(seconds=2),
+        window_seconds=300,
+        limit=2,
+    ) == (False, 268)
+    assert second_store.consume_auth_failure(
+        "client-hash",
+        now=now + timedelta(minutes=5),
+        window_seconds=300,
+        limit=2,
+    ) == (True, 270)
+
+
 def test_stream_ticket_is_scoped_hashed_and_expires(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = store.create("case-a", "live")

@@ -56,7 +56,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.6.0"
+    assert response.json()["info"]["version"] == "0.7.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:
@@ -119,6 +119,52 @@ def test_named_runner_credential_is_used_as_the_audit_actor() -> None:
     )
     assert audit.status_code == 200
     assert audit.json()["items"][0]["actor"] == "oncall-primary"
+
+
+def test_invalid_credentials_are_rate_limited_per_forwarded_client() -> None:
+    settings = Settings(
+        auth_failure_limit=2,
+        auth_failure_window_seconds=300,
+        rate_limit_secret="test-rate-limit-secret",
+        trusted_proxy_cidrs=["127.0.0.0/8"],
+        _env_file=None,
+    )
+    client = TestClient(
+        create_app(testing=True, settings=settings),
+        client=("127.0.0.1", 50000),
+    )
+    invalid_headers = {
+        "Authorization": "Bearer invalid-token",
+        "Origin": "http://localhost:3000",
+        "X-Forwarded-For": "198.51.100.10",
+    }
+
+    first = client.get("/api/v1/incidents", headers=invalid_headers)
+    second = client.get("/api/v1/incidents", headers=invalid_headers)
+    blocked = client.get("/api/v1/incidents", headers=invalid_headers)
+    other_client = client.get(
+        "/api/v1/incidents",
+        headers={
+            "Authorization": "Bearer invalid-token",
+            "X-Forwarded-For": "198.51.100.11",
+        },
+    )
+    valid = client.get(
+        "/api/v1/incidents",
+        headers={
+            **RUNNER_HEADERS,
+            "X-Forwarded-For": "198.51.100.10",
+        },
+    )
+
+    assert first.status_code == 403
+    assert second.status_code == 403
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 300
+    assert blocked.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+    assert blocked.headers["Cache-Control"] == "no-store"
+    assert other_client.status_code == 403
+    assert valid.status_code == 200
 
 
 def test_runner_access_is_scoped_to_the_investigation_owner() -> None:

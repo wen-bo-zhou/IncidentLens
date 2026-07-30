@@ -18,6 +18,7 @@
 - Exact-origin credentialed CORS and `no-store` on authenticated responses.
 - Owner-scoped Runner history, report access, stream-ticket issuance, cancellation and idempotency keys; administrators retain global access.
 - Imported incidents are excluded from anonymous catalog/detail responses and the public replay cache across restarts; Runner/Admin credentials are required to discover them.
+- Invalid supplied credentials are rate-limited per HMAC client identifier in durable storage; forwarded addresses are accepted only from configured trusted proxy networks.
 - Idempotent request/result persistence, durable audit events and one-time remediation state transition.
 
 SSE tickets travel in the event-stream query string because browser

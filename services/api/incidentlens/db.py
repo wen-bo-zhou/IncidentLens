@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
+from math import ceil
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import Any, cast
@@ -132,6 +133,17 @@ class DailyRunUsageRecord(Base):
     usage_date: Mapped[date] = mapped_column(Date, primary_key=True)
     actor_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AuthFailureLimitRecord(Base):
+    __tablename__ = "auth_failure_limits"
+
+    subject_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    bucket_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True, index=True
+    )
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -359,6 +371,63 @@ class InvestigationStore:
             )
             session.commit()
             return result.rowcount == 1
+
+    def consume_auth_failure(
+        self,
+        subject_hash: str,
+        *,
+        now: datetime,
+        window_seconds: int,
+        limit: int,
+    ) -> tuple[bool, int]:
+        if now.utcoffset() is None:
+            raise ValueError("Rate-limit timestamp must include a timezone")
+        bucket_epoch = int(now.timestamp()) // window_seconds * window_seconds
+        bucket_start = datetime.fromtimestamp(bucket_epoch, UTC)
+        bucket_end = bucket_start + timedelta(seconds=window_seconds)
+        retry_after = max(1, ceil((bucket_end - now).total_seconds()))
+        stale_before = bucket_start - timedelta(seconds=window_seconds * 2)
+
+        with self.session_factory() as session:
+            session.execute(
+                delete(AuthFailureLimitRecord).where(
+                    AuthFailureLimitRecord.bucket_start < stale_before
+                )
+            )
+            if (
+                session.get(AuthFailureLimitRecord, (subject_hash, bucket_start))
+                is None
+            ):
+                session.add(
+                    AuthFailureLimitRecord(
+                        subject_hash=subject_hash,
+                        bucket_start=bucket_start,
+                        failure_count=0,
+                        updated_at=now,
+                    )
+                )
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+        with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(AuthFailureLimitRecord)
+                    .where(
+                        AuthFailureLimitRecord.subject_hash == subject_hash,
+                        AuthFailureLimitRecord.bucket_start == bucket_start,
+                        AuthFailureLimitRecord.failure_count < limit,
+                    )
+                    .values(
+                        failure_count=AuthFailureLimitRecord.failure_count + 1,
+                        updated_at=now,
+                    )
+                ),
+            )
+            session.commit()
+            return result.rowcount == 1, retry_after
 
     def ping(self) -> None:
         with self.session_factory() as session:

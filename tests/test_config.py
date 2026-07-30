@@ -12,6 +12,7 @@ def _production_settings(**overrides: object) -> Settings:
         "admin_credentials": {
             "security-lead": "admin-production-token-000000000001"
         },
+        "rate_limit_secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         "cors_origins": ["https://incidentlens.example.com"],
     }
     values.update(overrides)
@@ -41,6 +42,25 @@ def test_production_rejects_credentials_shared_across_roles() -> None:
             runner_credentials={"oncall-primary": shared},
             admin_credentials={"security-lead": shared},
         )
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "too-short",
+        "0" * 64,
+        " " * 43,
+        "incidentlens-development-rate-limit-secret",
+    ],
+)
+def test_production_rejects_a_weak_rate_limit_secret(secret: str) -> None:
+    with pytest.raises(ValidationError, match="rate-limit secret"):
+        _production_settings(rate_limit_secret=secret)
+
+
+def test_trusted_proxies_must_be_strict_cidr_networks() -> None:
+    with pytest.raises(ValidationError, match="valid CIDR networks"):
+        Settings(trusted_proxy_cidrs=["127.0.0.1/24"], _env_file=None)
 
 
 def test_named_actor_identity_cannot_be_shared_across_roles() -> None:

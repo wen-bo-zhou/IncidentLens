@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Annotated, Literal
@@ -20,11 +21,18 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
+from starlette.concurrency import run_in_threadpool
 
-from incidentlens.auth import Principal, principal_from_header, require_role
+from incidentlens.auth import (
+    Principal,
+    client_ip_from_request,
+    principal_from_header,
+    require_role,
+)
 from incidentlens.config import Settings, get_settings
 from incidentlens.db import InvestigationStore, create_session_factory
 from incidentlens.evals import EvaluationRunner
@@ -105,9 +113,52 @@ def create_app(
     }
     app = FastAPI(
         title="IncidentLens API",
-        version="0.6.0",
+        version="0.7.0",
         description="Evidence-first production incident investigation assistant",
     )
+    app.state.repository = repository
+    app.state.store = store
+    app.state.settings = settings
+    app.state.replay_cache = replay_cache
+
+    @app.middleware("http")
+    async def throttle_invalid_credentials(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        authorization = request.headers.get("authorization")
+        if (
+            authorization is not None
+            and principal_from_header(authorization, settings).role == "guest"
+        ):
+            client_ip = client_ip_from_request(
+                request,
+                settings.trusted_proxy_cidrs,
+            )
+            subject_hash = hmac.new(
+                settings.rate_limit_secret.get_secret_value().encode(),
+                f"auth-failure:{client_ip}".encode(),
+                sha256,
+            ).hexdigest()
+            allowed, retry_after = await run_in_threadpool(
+                store.consume_auth_failure,
+                subject_hash,
+                now=datetime.now(UTC),
+                window_seconds=settings.auth_failure_window_seconds,
+                limit=settings.auth_failure_limit,
+            )
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many authentication failures"},
+                    headers={"Retry-After": str(retry_after)},
+                )
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid credential"},
+            )
+        return await call_next(request)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -116,10 +167,6 @@ def create_app(
         allow_headers=["*"],
     )
     telemetry = configure_observability(app)
-    app.state.repository = repository
-    app.state.store = store
-    app.state.settings = settings
-    app.state.replay_cache = replay_cache
 
     runner = require_role(settings, "runner", "admin")
     admin = require_role(settings, "admin")

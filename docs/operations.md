@@ -69,6 +69,28 @@ The map key is written to the audit ledger as the actor. Raw credentials are
 never persisted, and responses to requests carrying authorization or stream
 tickets are marked `Cache-Control: no-store`.
 
+Generate `RATE_LIMIT_SECRET` from at least 32 random bytes in production:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+The value must be unpadded base64url and must not be reused across
+environments. `AUTH_FAILURE_LIMIT` defaults to 10 attempts per
+`AUTH_FAILURE_WINDOW_SECONDS=300`. Attempts above the limit return HTTP 429
+with `Retry-After`; valid credentials remain usable. Rate-limit rows contain
+only HMAC client identifiers and are shared by all API instances.
+
+Set `TRUSTED_PROXY_CIDRS` to a JSON array containing only the networks that
+directly proxy the API. The Compose profile uses `["172.16.0.0/12"]` because
+the API is not published outside its private Docker network. If the API is
+exposed directly, replace this range with the exact ingress network or an empty
+array; never trust all Internet addresses.
+
+IncidentLens must receive the direct socket peer unchanged so it can enforce
+that allowlist. The provided API container starts Uvicorn with
+`--no-proxy-headers`; preserve that setting for custom process managers.
+
 ## Database lifecycle
 
 The API container runs `alembic upgrade head` before serving traffic. Before an upgrade, create a backup:

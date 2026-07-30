@@ -25,6 +25,12 @@ the selected name becomes the durable audit actor while quota keys remain
 one-way token digests. Production startup rejects demo, short or duplicate
 credentials and accepts only an explicit exact-origin CORS allowlist.
 
+Invalid supplied credentials pass through a database-backed fixed-window
+limiter before route dispatch. Client addresses are derived from
+`X-Forwarded-For` only when the direct peer belongs to `TRUSTED_PROXY_CIDRS`;
+the database key is an HMAC digest rather than a raw address. The atomic
+conditional update keeps the limit consistent across API workers.
+
 Every newly created investigation persists the principal actor as its owner.
 Runner history, detail reads, stream-ticket issuance and cancellation are
 filtered by that owner; administrators retain a global operational view.

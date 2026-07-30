@@ -15,6 +15,7 @@ Evidence-first AI production incident investigation assistant. It correlates log
 - Named multi-credential access, production startup validation and configurable exact-origin CORS.
 - Runner-owned investigation access with administrator-wide operational visibility and identity-scoped idempotency.
 - Private imported-incident catalog: anonymous users see only built-in demos; Runner/Admin credentials unlock imported cases without creating public replays.
+- Durable per-client authentication-failure throttling with trusted-proxy parsing, HMAC identifiers and `Retry-After` responses.
 - Next.js incident console, causal-spine timeline, evidence dialog and evaluation console.
 - Prometheus metrics, OpenTelemetry spans, Docker Compose and optional Grafana/Tempo profile.
 - Deterministic one-shot baseline versus Agent evaluation, Markdown export and admin-approved sandbox simulation.
@@ -34,7 +35,7 @@ Start the API and web app in separate terminals:
 
 ```powershell
 $env:PYTHONPATH='services/api'
-uv run uvicorn incidentlens.app:app --reload
+uv run uvicorn incidentlens.app:app --reload --no-proxy-headers
 ```
 
 ```powershell
@@ -63,6 +64,14 @@ For a public deployment, set `APP_ENV=production` and either replace
 provide JSON maps through `RUNNER_CREDENTIALS` and `ADMIN_CREDENTIALS`. Named
 credentials appear as actors in the audit ledger. Set `CORS_ORIGINS` to a JSON
 array of exact browser origins; wildcard origins are rejected.
+
+Authentication failures are limited per client across API instances using the
+database-backed fixed window. Production requires a unique
+`RATE_LIMIT_SECRET` generated from at least 32 random bytes as unpadded
+base64url (for example, `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+Configure
+`TRUSTED_PROXY_CIDRS` for the reverse proxies allowed to supply
+`X-Forwarded-For`; untrusted forwarding headers are ignored.
 
 Each Runner can list, read, stream and cancel only investigations created by
 that named identity. Administrators retain access to every investigation.
@@ -112,3 +121,5 @@ IncidentLens 是一个证据优先的 AI 生产事故调查助手。它把日志
 
 导入的生产事故默认属于私有目录，匿名访问只能看到内置演示；Runner/Admin
 令牌可以临时解锁私有目录，但导入事故不会生成公开回放，服务重启后也不会改变这一边界。
+无效认证尝试会按客户端跨实例持久限流；只有可信代理网段提供的转发地址会被采信，
+数据库仅保存使用生产 HMAC 密钥生成的不可逆客户端标识。

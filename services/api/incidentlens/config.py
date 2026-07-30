@@ -1,5 +1,8 @@
 import re
+from base64 import urlsafe_b64decode
+from binascii import Error as Base64DecodeError
 from functools import lru_cache
+from ipaddress import ip_network
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
@@ -7,6 +10,16 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 CredentialRole = Literal["runner", "admin"]
+
+
+def _is_strong_rate_limit_secret(value: str) -> bool:
+    if re.fullmatch(r"[A-Za-z0-9_-]{43,}", value) is None:
+        return False
+    try:
+        decoded = urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (Base64DecodeError, ValueError):
+        return False
+    return len(decoded) >= 32 and len(set(value)) >= 12
 
 
 class Settings(BaseSettings):
@@ -20,6 +33,14 @@ class Settings(BaseSettings):
     model_name: str = "qwen-plus"
     max_cost_cny: float = 0.20
     runner_daily_limit: int = 10
+    auth_failure_limit: int = Field(default=10, ge=1, le=1000)
+    auth_failure_window_seconds: int = Field(default=300, ge=10, le=86400)
+    rate_limit_secret: SecretStr = SecretStr(
+        "incidentlens-development-rate-limit-secret"
+    )
+    trusted_proxy_cidrs: list[str] = Field(
+        default_factory=lambda: ["127.0.0.0/8", "::1/128"]
+    )
     runner_token: SecretStr = SecretStr("runner-demo-token")
     admin_token: SecretStr = SecretStr("admin-demo-token")
     runner_credentials: dict[str, SecretStr] = Field(default_factory=dict)
@@ -62,6 +83,16 @@ class Settings(BaseSettings):
                 raise ValueError("CORS entries must be exact HTTP origins")
         return value
 
+    @field_validator("trusted_proxy_cidrs")
+    @classmethod
+    def validate_trusted_proxy_cidrs(cls, value: list[str]) -> list[str]:
+        for network in value:
+            try:
+                ip_network(network, strict=True)
+            except ValueError as exc:
+                raise ValueError("Trusted proxies must be valid CIDR networks") from exc
+        return value
+
     @model_validator(mode="after")
     def validate_credentials(self) -> Self:
         runner = self.credentials_for("runner")
@@ -81,6 +112,15 @@ class Settings(BaseSettings):
             if any(len(token) < 32 for token in values):
                 raise ValueError(
                     "Production credentials must contain at least 32 characters"
+                )
+            rate_limit_secret = self.rate_limit_secret.get_secret_value()
+            if (
+                rate_limit_secret == "incidentlens-development-rate-limit-secret"
+                or not _is_strong_rate_limit_secret(rate_limit_secret)
+            ):
+                raise ValueError(
+                    "Production rate-limit secret must encode at least 32 random "
+                    "bytes as unpadded base64url"
                 )
         return self
 

@@ -1,10 +1,12 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
+from ipaddress import ip_address, ip_network
 from secrets import compare_digest
 from typing import Literal
 
 from fastapi import Header, HTTPException
+from starlette.requests import Request
 
 from incidentlens.config import Settings
 
@@ -16,6 +18,42 @@ class Principal:
     role: Role
     actor: str
     token_hash: str | None = None
+
+
+def client_ip_from_request(
+    request: Request,
+    trusted_proxy_cidrs: list[str],
+) -> str:
+    peer_value = request.client.host if request.client is not None else "unknown"
+    try:
+        peer = ip_address(peer_value)
+    except ValueError:
+        return "unknown"
+    trusted_networks = tuple(
+        ip_network(network, strict=True) for network in trusted_proxy_cidrs
+    )
+
+    def is_trusted(value: object) -> bool:
+        return any(value in network for network in trusted_networks)
+
+    if not is_trusted(peer):
+        return peer.compressed
+    forwarded = request.headers.get("x-forwarded-for")
+    if not forwarded:
+        return peer.compressed
+    values = [item.strip() for item in forwarded.split(",")]
+    if not values or len(values) > 20:
+        return peer.compressed
+    try:
+        forwarded_addresses = [ip_address(item) for item in values]
+    except ValueError:
+        return peer.compressed
+    current = peer
+    for address in reversed(forwarded_addresses):
+        if not is_trusted(current):
+            break
+        current = address
+    return current.compressed
 
 
 def principal_from_header(
