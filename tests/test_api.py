@@ -57,7 +57,7 @@ def test_versioned_openapi_schema_is_available() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "IncidentLens API"
-    assert response.json()["info"]["version"] == "0.8.0"
+    assert response.json()["info"]["version"] == "0.9.0"
 
 
 def test_runner_can_create_and_read_inline_investigation() -> None:

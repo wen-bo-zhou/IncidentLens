@@ -165,3 +165,10 @@ export interface Page<T> {
   limit: number;
   offset: number;
 }
+
+export interface AuthSession {
+  authenticated: boolean;
+  sso_enabled: boolean;
+  role: "guest" | "runner" | "admin";
+  actor: string | null;
+}

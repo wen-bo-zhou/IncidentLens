@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     runner_daily_limit: int = 10
     auth_failure_limit: int = Field(default=10, ge=1, le=1000)
     auth_failure_window_seconds: int = Field(default=300, ge=10, le=86400)
+    rate_limit_max_records: int = Field(default=10000, ge=1, le=1000000)
     rate_limit_secret: SecretStr = SecretStr(
         "incidentlens-development-rate-limit-secret"
     )
@@ -65,6 +66,22 @@ class Settings(BaseSettings):
     oidc_groups_claim: str = "groups"
     oidc_runner_groups: list[str] = Field(default_factory=list)
     oidc_admin_groups: list[str] = Field(default_factory=list)
+    oidc_authorization_url: str = ""
+    oidc_token_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: SecretStr = SecretStr("")
+    oidc_redirect_uri: str = ""
+    oidc_scopes: list[str] = Field(default_factory=lambda: ["openid"])
+    oidc_login_ttl_seconds: int = Field(default=600, ge=60, le=900)
+    oidc_login_rate_limit: int = Field(default=10, ge=1, le=1000)
+    oidc_login_rate_window_seconds: int = Field(default=60, ge=10, le=3600)
+    oidc_login_max_outstanding: int = Field(default=5000, ge=1, le=100000)
+    oidc_login_max_outstanding_per_client: int = Field(
+        default=10,
+        ge=1,
+        le=1000,
+    )
+    oidc_session_ttl_seconds: int = Field(default=28800, ge=300, le=86400)
     runner_token: SecretStr = SecretStr("runner-demo-token")
     admin_token: SecretStr = SecretStr("admin-demo-token")
     runner_credentials: dict[str, SecretStr] = Field(default_factory=dict)
@@ -139,6 +156,27 @@ class Settings(BaseSettings):
             raise ValueError("OIDC role groups cannot contain duplicates")
         return value
 
+    @field_validator("oidc_scopes")
+    @classmethod
+    def validate_oidc_scopes(cls, value: list[str]) -> list[str]:
+        if (
+            not value
+            or len(value) > 20
+            or len(value) != len(set(value))
+            or any(
+                re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", scope) is None
+                for scope in value
+            )
+        ):
+            raise ValueError("OIDC scopes must be unique safe scope names")
+        if "openid" not in value:
+            raise ValueError("Browser OIDC scopes must include openid")
+        if "offline_access" in value:
+            raise ValueError(
+                "Browser OIDC cannot request offline_access without refresh-token storage"
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_authentication(self) -> Self:
         oidc_endpoints = (
@@ -175,6 +213,76 @@ class Settings(BaseSettings):
                     raise ValueError("OIDC endpoints must be absolute HTTP URLs")
                 if self.app_env == "production" and parsed.scheme != "https":
                     raise ValueError("Production OIDC endpoints must use HTTPS")
+
+        browser_fields = (
+            self.oidc_authorization_url,
+            self.oidc_token_url,
+            self.oidc_client_id,
+            self.oidc_redirect_uri,
+        )
+        browser_configured = any(
+            (
+                *browser_fields,
+                self.oidc_client_secret.get_secret_value(),
+            )
+        )
+        if browser_configured and not all(browser_fields):
+            raise ValueError(
+                "OIDC browser client authorization URL, token URL, client ID "
+                "and redirect URI must be configured together"
+            )
+        if self.oidc_browser_enabled:
+            if not self.oidc_enabled:
+                raise ValueError("OIDC browser client requires OIDC token validation")
+            if (
+                self.oidc_login_max_outstanding_per_client
+                > self.oidc_login_max_outstanding
+            ):
+                raise ValueError(
+                    "OIDC per-client pending login limit cannot exceed "
+                    "the global pending login limit"
+                )
+            for endpoint in (
+                self.oidc_authorization_url,
+                self.oidc_token_url,
+            ):
+                parsed = urlsplit(endpoint)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError(
+                        "OIDC browser endpoints must be absolute HTTP URLs"
+                    )
+                if self.app_env == "production" and parsed.scheme != "https":
+                    raise ValueError(
+                        "Production OIDC browser endpoints must use HTTPS"
+                    )
+            redirect = urlsplit(self.oidc_redirect_uri)
+            if (
+                redirect.scheme not in {"http", "https"}
+                or not redirect.netloc
+                or redirect.username is not None
+                or redirect.password is not None
+                or redirect.query
+                or redirect.fragment
+            ):
+                raise ValueError(
+                    "OIDC redirect URI must be an absolute URL without query or fragment"
+                )
+            if self.app_env == "production":
+                if redirect.scheme != "https":
+                    raise ValueError(
+                        "Production OIDC browser endpoints must use HTTPS"
+                    )
+                if not self.oidc_client_secret.get_secret_value():
+                    raise ValueError(
+                        "Production OIDC browser client requires a client secret"
+                    )
         if not self.static_auth_enabled and not self.oidc_enabled:
             raise ValueError("Disabling static authentication requires OIDC")
 
@@ -215,6 +323,15 @@ class Settings(BaseSettings):
     @property
     def oidc_enabled(self) -> bool:
         return bool(self.oidc_issuer and self.oidc_audience and self.oidc_jwks_url)
+
+    @property
+    def oidc_browser_enabled(self) -> bool:
+        return bool(
+            self.oidc_authorization_url
+            and self.oidc_token_url
+            and self.oidc_client_id
+            and self.oidc_redirect_uri
+        )
 
     def credentials_for(
         self, role: CredentialRole

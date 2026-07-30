@@ -26,6 +26,7 @@ from pydantic import BaseModel, model_validator
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import RedirectResponse
 
 from incidentlens.auth import (
     AuthenticationUnavailable,
@@ -42,9 +43,16 @@ from incidentlens.evals import EvaluationRunner
 from incidentlens.model_client import build_model_client
 from incidentlens.observability import configure_observability
 from incidentlens.oidc import OidcTokenVerifier
+from incidentlens.oidc_browser import OidcBrowserClient, OidcExchangeError
 from incidentlens.scenarios import ScenarioRepository
 from incidentlens.schemas import IncidentCase
 from incidentlens.workflow import InvestigationEngine
+
+_OIDC_TRANSACTION_COOKIE = "incidentlens_oidc_transaction"
+_SESSION_COOKIE = "incidentlens_session"
+_CSRF_HEADER = "x-incidentlens-csrf"
+_SAFE_RETURN_PATHS = {"/", "/operations", "/evaluations"}
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 class InvestigationCreate(BaseModel):
@@ -77,6 +85,7 @@ def create_app(
     testing: bool = False,
     settings: Settings | None = None,
     oidc_verifier: BearerTokenVerifier | None = None,
+    oidc_browser_client: OidcBrowserClient | None = None,
 ) -> FastAPI:
     if settings is None:
         settings = (
@@ -121,9 +130,21 @@ def create_app(
     if active_oidc_verifier is None and settings.oidc_enabled:
         owned_oidc_verifier = OidcTokenVerifier(settings)
         active_oidc_verifier = owned_oidc_verifier
+    active_oidc_browser_client = oidc_browser_client
+    owned_oidc_browser_client: OidcBrowserClient | None = None
+    if active_oidc_browser_client is None and settings.oidc_browser_enabled:
+        if not isinstance(active_oidc_verifier, OidcTokenVerifier):
+            raise ValueError(
+                "Browser OIDC requires the full OIDC token verifier"
+            )
+        owned_oidc_browser_client = OidcBrowserClient(
+            settings,
+            active_oidc_verifier,
+        )
+        active_oidc_browser_client = owned_oidc_browser_client
     app = FastAPI(
         title="IncidentLens API",
-        version="0.8.0",
+        version="0.9.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.state.repository = repository
@@ -131,8 +152,14 @@ def create_app(
     app.state.settings = settings
     app.state.replay_cache = replay_cache
     app.state.oidc_verifier = active_oidc_verifier
+    app.state.oidc_browser_client = active_oidc_browser_client
     if owned_oidc_verifier is not None:
         app.router.add_event_handler("shutdown", owned_oidc_verifier.close)
+    if owned_oidc_browser_client is not None:
+        app.router.add_event_handler(
+            "shutdown",
+            owned_oidc_browser_client.close,
+        )
 
     @app.middleware("http")
     async def throttle_invalid_credentials(
@@ -140,6 +167,8 @@ def create_app(
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         authorization = request.headers.get("authorization")
+        principal = Principal(role="guest", actor="guest")
+        authentication_source: str | None = None
         if authorization is not None:
             try:
                 principal = await run_in_threadpool(
@@ -155,6 +184,7 @@ def create_app(
                     headers={"Retry-After": "30"},
                 )
             request.state.principal = principal
+            authentication_source = "bearer"
             if principal.role == "guest":
                 client_ip = client_ip_from_request(
                     request,
@@ -171,6 +201,7 @@ def create_app(
                     now=datetime.now(UTC),
                     window_seconds=settings.auth_failure_window_seconds,
                     limit=settings.auth_failure_limit,
+                    max_records=settings.rate_limit_max_records,
                 )
                 if not allowed:
                     return JSONResponse(
@@ -182,6 +213,31 @@ def create_app(
                     status_code=403,
                     content={"detail": "Invalid credential"},
                 )
+        else:
+            session_token = request.cookies.get(_SESSION_COOKIE)
+            if session_token is not None and len(session_token) <= 128:
+                session_principal = await run_in_threadpool(
+                    store.authenticate_browser_session,
+                    session_token,
+                    now=datetime.now(UTC),
+                )
+                principal = session_principal or Principal(
+                    role="guest",
+                    actor="guest",
+                )
+                if principal.role != "guest":
+                    request.state.principal = principal
+                    authentication_source = "session"
+        request.state.authentication_source = authentication_source
+        if (
+            authentication_source == "session"
+            and request.method in _UNSAFE_METHODS
+            and request.headers.get(_CSRF_HEADER) != "1"
+        ):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "CSRF validation failed"},
+            )
         return await call_next(request)
 
     app.add_middleware(
@@ -231,6 +287,20 @@ def create_app(
             raise HTTPException(status_code=404, detail="Investigation not found")
         return value
 
+    def no_store(response: Response) -> None:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Referrer-Policy"] = "no-referrer"
+
+    def clear_oidc_transaction_cookie(response: Response) -> None:
+        response.delete_cookie(
+            _OIDC_TRANSACTION_COOKIE,
+            path="/api/v1/auth/callback",
+            secure=settings.app_env == "production",
+            httponly=True,
+            samesite="lax",
+        )
+
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
         return {"status": "ok"}
@@ -246,6 +316,232 @@ def create_app(
                 status_code=503, detail="A required dependency is unavailable"
             ) from exc
         return {"status": "ready"}
+
+    @app.get("/api/v1/auth/session")
+    def auth_session(request: Request, response: Response) -> dict[str, object]:
+        principal = getattr(
+            request.state,
+            "principal",
+            Principal(role="guest", actor="guest"),
+        )
+        no_store(response)
+        return {
+            "authenticated": principal.role != "guest",
+            "sso_enabled": settings.oidc_browser_enabled,
+            "role": principal.role,
+            "actor": principal.actor if principal.role != "guest" else None,
+        }
+
+    @app.get("/api/v1/auth/login", include_in_schema=False)
+    async def auth_login(
+        request: Request,
+        return_to: Annotated[str, Query(max_length=200)] = "/",
+    ) -> Response:
+        if active_oidc_browser_client is None:
+            raise HTTPException(status_code=404, detail="Browser SSO is disabled")
+        client_ip = client_ip_from_request(
+            request,
+            settings.trusted_proxy_cidrs,
+        )
+        client_hash = hmac.new(
+            settings.rate_limit_secret.get_secret_value().encode(),
+            f"oidc-login:{client_ip}".encode(),
+            sha256,
+        ).hexdigest()
+        allowed, retry_after = await run_in_threadpool(
+            store.consume_auth_failure,
+            client_hash,
+            now=datetime.now(UTC),
+            window_seconds=settings.oidc_login_rate_window_seconds,
+            limit=settings.oidc_login_rate_limit,
+            max_records=settings.rate_limit_max_records,
+        )
+        if not allowed:
+            response: Response = JSONResponse(
+                status_code=429,
+                content={"detail": "Too many login attempts"},
+                headers={"Retry-After": str(retry_after)},
+            )
+            no_store(response)
+            return response
+        safe_return_to = return_to if return_to in _SAFE_RETURN_PATHS else "/"
+        started = active_oidc_browser_client.begin_authorization()
+        now = datetime.now(UTC)
+        admitted = await run_in_threadpool(
+            store.create_oidc_login,
+            state=started.state,
+            browser_token=started.browser_token,
+            client_hash=client_hash,
+            code_verifier=started.code_verifier,
+            nonce=started.nonce,
+            return_to=safe_return_to,
+            now=now,
+            expires_at=now + timedelta(
+                seconds=settings.oidc_login_ttl_seconds
+            ),
+            max_outstanding=settings.oidc_login_max_outstanding,
+            max_outstanding_per_client=(
+                settings.oidc_login_max_outstanding_per_client
+            ),
+        )
+        if not admitted:
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": "Too many pending login attempts"},
+                headers={"Retry-After": "30"},
+            )
+            no_store(response)
+            return response
+        response = RedirectResponse(
+            started.authorization_url,
+            status_code=status.HTTP_302_FOUND,
+        )
+        response.set_cookie(
+            _OIDC_TRANSACTION_COOKIE,
+            started.browser_token,
+            max_age=settings.oidc_login_ttl_seconds,
+            path="/api/v1/auth/callback",
+            secure=settings.app_env == "production",
+            httponly=True,
+            samesite="lax",
+        )
+        no_store(response)
+        return response
+
+    @app.get("/api/v1/auth/callback", include_in_schema=False)
+    async def auth_callback(
+        request: Request,
+        state_value: Annotated[
+            str,
+            Query(alias="state", min_length=1, max_length=512),
+        ],
+        code: Annotated[
+            str | None,
+            Query(min_length=1, max_length=4096),
+        ] = None,
+        error: Annotated[
+            str | None,
+            Query(min_length=1, max_length=200),
+        ] = None,
+    ) -> Response:
+        if active_oidc_browser_client is None:
+            raise HTTPException(status_code=404, detail="Browser SSO is disabled")
+        browser_token = request.cookies.get(_OIDC_TRANSACTION_COOKIE)
+        transaction = None
+        if browser_token is not None and len(browser_token) <= 128:
+            transaction = await run_in_threadpool(
+                store.consume_oidc_login,
+                state=state_value,
+                browser_token=browser_token,
+                now=datetime.now(UTC),
+            )
+        if transaction is None:
+            response: Response = JSONResponse(
+                status_code=400,
+                content={"detail": "OIDC login transaction is invalid or expired"},
+            )
+            clear_oidc_transaction_cookie(response)
+            no_store(response)
+            return response
+        if error is not None or code is None:
+            response = JSONResponse(
+                status_code=400,
+                content={"detail": "OIDC callback validation failed"},
+            )
+            clear_oidc_transaction_cookie(response)
+            no_store(response)
+            return response
+        try:
+            identity = await run_in_threadpool(
+                active_oidc_browser_client.exchange_code,
+                code=code,
+                code_verifier=transaction["code_verifier"],
+                nonce=transaction["nonce"],
+            )
+        except AuthenticationUnavailable:
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "Authentication service unavailable"},
+                headers={"Retry-After": "30"},
+            )
+            clear_oidc_transaction_cookie(response)
+            no_store(response)
+            return response
+        except OidcExchangeError:
+            response = JSONResponse(
+                status_code=400,
+                content={"detail": "OIDC callback validation failed"},
+            )
+            clear_oidc_transaction_cookie(response)
+            no_store(response)
+            return response
+        now = datetime.now(UTC)
+        expires_at = min(
+            identity.expires_at,
+            now + timedelta(seconds=settings.oidc_session_ttl_seconds),
+        )
+        if expires_at <= now:
+            response = JSONResponse(
+                status_code=400,
+                content={"detail": "OIDC callback validation failed"},
+            )
+            clear_oidc_transaction_cookie(response)
+            no_store(response)
+            return response
+        session_token = await run_in_threadpool(
+            store.create_browser_session,
+            identity.principal,
+            now=now,
+            expires_at=expires_at,
+        )
+        return_to = transaction["return_to"]
+        if return_to not in _SAFE_RETURN_PATHS:
+            return_to = "/"
+        response = RedirectResponse(
+            return_to,
+            status_code=status.HTTP_302_FOUND,
+        )
+        response.set_cookie(
+            _SESSION_COOKIE,
+            session_token,
+            max_age=max(1, int((expires_at - now).total_seconds())),
+            path="/",
+            secure=settings.app_env == "production",
+            httponly=True,
+            samesite="strict",
+        )
+        clear_oidc_transaction_cookie(response)
+        no_store(response)
+        store.record_audit(
+            actor=identity.principal.actor,
+            action="auth.session_created",
+            resource_id=identity.principal.actor,
+            detail={"role": identity.principal.role},
+        )
+        return response
+
+    @app.post(
+        "/api/v1/auth/logout",
+        status_code=status.HTTP_204_NO_CONTENT,
+        include_in_schema=False,
+    )
+    async def auth_logout(request: Request) -> Response:
+        session_token = request.cookies.get(_SESSION_COOKIE)
+        if session_token is not None and len(session_token) <= 128:
+            await run_in_threadpool(
+                store.revoke_browser_session,
+                session_token,
+            )
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        response.delete_cookie(
+            _SESSION_COOKIE,
+            path="/",
+            secure=settings.app_env == "production",
+            httponly=True,
+            samesite="strict",
+        )
+        no_store(response)
+        return response
 
     @app.get("/api/v1/incidents")
     def list_incidents(

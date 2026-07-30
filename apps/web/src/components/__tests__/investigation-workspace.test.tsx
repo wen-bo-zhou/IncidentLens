@@ -129,6 +129,31 @@ describe("InvestigationWorkspace", () => {
     expect(screen.queryByLabelText("Runner 令牌")).not.toBeInTheDocument();
   });
 
+  it("uses an enterprise runner session without rendering a token field", async () => {
+    const user = userEvent.setup();
+    const runLive = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InvestigationWorkspace
+        incident={incident}
+        report={report}
+        loading={false}
+        onRun={vi.fn()}
+        onRunLive={runLive}
+        sessionRole="runner"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "实时调查" }));
+    expect(screen.queryByLabelText("Runner 令牌")).not.toBeInTheDocument();
+    expect(screen.getByText("企业 Runner 会话已验证")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认启动" }));
+
+    expect(runLive).toHaveBeenCalledWith("", {
+      startAt: incident.starts_at,
+      endAt: incident.ends_at,
+    });
+  });
+
   it("explains an inconclusive report and shows the missing evidence", () => {
     const inconclusiveReport: InvestigationReport = {
       ...report,

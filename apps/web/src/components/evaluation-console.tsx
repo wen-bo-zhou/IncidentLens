@@ -5,6 +5,8 @@ import { ArrowLeft, Check, FlaskConical, KeyRound, Play, ShieldCheck } from "luc
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 
+import { useAuth } from "@/components/auth-context";
+import { SessionControl } from "@/components/session-control";
 import { api } from "@/lib/api";
 import type { EvaluationSummary } from "@/lib/types";
 
@@ -27,8 +29,12 @@ const snapshot: EvaluationSummary = {
 };
 
 export function EvaluationConsole() {
+  const { session } = useAuth();
   const [token, setToken] = useState("");
-  const evaluation = useMutation({ mutationFn: () => api.evaluation(token) });
+  const sessionAdmin = session.role === "admin";
+  const evaluation = useMutation({
+    mutationFn: () => api.evaluation(token || undefined),
+  });
   const data = evaluation.data ?? snapshot;
 
   function run(event: FormEvent) {
@@ -90,10 +96,23 @@ export function EvaluationConsole() {
           <div className="runner-icon"><KeyRound /></div>
           <span className="eyebrow">Admin runner</span>
           <h2>启动完整回归</h2>
-          <p>实时评测需要管理员令牌。令牌只随本次请求发送，不会保存在浏览器。</p>
-          <label htmlFor="admin-token">管理员令牌</label>
-          <input id="admin-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="admin-demo-token" />
-          <button disabled={!token || evaluation.isPending}><Play size={16} />{evaluation.isPending ? "正在运行" : "运行 15 案例评测"}</button>
+          <p>
+            实时评测需要 Admin 权限，并会记录到治理审计轨迹。
+          </p>
+          {sessionAdmin ? (
+            <p className="session-assurance">
+              <ShieldCheck size={15} /> 企业 Admin 会话已验证
+            </p>
+          ) : (
+            <>
+              {session.sso_enabled && (
+                <SessionControl returnTo="/evaluations" />
+              )}
+              <label htmlFor="admin-token">管理员令牌</label>
+              <input id="admin-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="admin-demo-token" />
+            </>
+          )}
+          <button disabled={(!sessionAdmin && !token) || evaluation.isPending}><Play size={16} />{evaluation.isPending ? "正在运行" : "运行 15 案例评测"}</button>
           {evaluation.error && <p className="form-error">{evaluation.error.message}</p>}
           {evaluation.isSuccess && <p className="form-success"><ShieldCheck size={15} /> 本次回归已完成</p>}
         </form>

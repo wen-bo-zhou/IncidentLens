@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppShell } from "@/components/app-shell";
+import { useAuth } from "@/components/auth-context";
 import { api } from "@/lib/api";
 import type {
   IncidentCase,
@@ -23,6 +24,9 @@ vi.mock("@/lib/api", () => ({
     approveRemediation: vi.fn(),
     eventsUrl: vi.fn(),
   },
+}));
+vi.mock("@/components/auth-context", () => ({
+  useAuth: vi.fn(),
 }));
 
 const incident: IncidentCase = {
@@ -120,6 +124,7 @@ function renderApp() {
 
 describe("AppShell", () => {
   const mockedApi = vi.mocked(api);
+  const mockedUseAuth = vi.mocked(useAuth);
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -139,6 +144,17 @@ describe("AppShell", () => {
       expires_at: "2026-07-27T12:05:00Z",
     });
     mockedApi.eventsUrl.mockReturnValue("/api/v1/investigations/inv-1/events");
+    mockedUseAuth.mockReturnValue({
+      session: {
+        authenticated: false,
+        sso_enabled: false,
+        role: "guest",
+        actor: null,
+      },
+      isLoading: false,
+      error: null,
+      logout: vi.fn(),
+    });
   });
 
   it("polls the terminal report when the event stream disconnects", async () => {
@@ -211,5 +227,38 @@ describe("AppShell", () => {
 
     expect(await screen.findByText("Private production incident")).toBeInTheDocument();
     expect(mockedApi.incidents).toHaveBeenLastCalledWith("runner-token");
+  });
+
+  it("propagates an enterprise runner session into live investigations", async () => {
+    const user = userEvent.setup();
+    mockedUseAuth.mockReturnValue({
+      session: {
+        authenticated: true,
+        sso_enabled: true,
+        role: "runner",
+        actor: "oidc-runner",
+      },
+      isLoading: false,
+      error: null,
+      logout: vi.fn(),
+    });
+
+    renderApp();
+    await user.click(
+      await screen.findByRole("button", { name: "实时调查" }),
+    );
+    expect(screen.queryByLabelText("Runner 令牌")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认启动" }));
+
+    expect(mockedApi.createInvestigation).toHaveBeenCalledWith(
+      "case-1",
+      "",
+      "case-1-request-1",
+      {
+        startAt: incident.starts_at,
+        endAt: incident.ends_at,
+      },
+    );
+    expect(screen.getByText("oidc-runner")).toBeInTheDocument();
   });
 });

@@ -31,11 +31,92 @@ def _oidc_settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **values)
 
 
+def _browser_oidc_settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "oidc_authorization_url": "https://idp.example.com/authorize",
+        "oidc_token_url": "https://idp.example.com/token",
+        "oidc_client_id": "incidentlens-web",
+        "oidc_client_secret": "development-client-secret",
+        "oidc_redirect_uri": (
+            "https://incidentlens.example.com/api/v1/auth/callback"
+        ),
+        "oidc_scopes": ["openid", "profile"],
+    }
+    values.update(overrides)
+    return _oidc_settings(**values)
+
+
 def test_complete_oidc_configuration_enables_federated_authentication() -> None:
     settings = _oidc_settings()
 
     assert settings.oidc_enabled is True
     assert settings.oidc_groups_claim == "groups"
+
+
+def test_complete_browser_oidc_configuration_enables_server_side_login() -> None:
+    settings = _browser_oidc_settings()
+
+    assert settings.oidc_browser_enabled is True
+    assert settings.oidc_scopes == ["openid", "profile"]
+
+
+def test_browser_oidc_pending_limit_cannot_exceed_the_global_limit() -> None:
+    with pytest.raises(ValidationError, match="per-client pending"):
+        _browser_oidc_settings(
+            oidc_login_max_outstanding=5,
+            oidc_login_max_outstanding_per_client=6,
+        )
+
+
+def test_browser_oidc_configuration_requires_a_complete_client_boundary() -> None:
+    with pytest.raises(ValidationError, match="browser client"):
+        _oidc_settings(
+            oidc_authorization_url="https://idp.example.com/authorize",
+        )
+
+
+def test_browser_oidc_configuration_requires_openid_without_offline_access() -> None:
+    with pytest.raises(ValidationError, match="openid"):
+        _browser_oidc_settings(oidc_scopes=["profile"])
+    with pytest.raises(ValidationError, match="offline_access"):
+        _browser_oidc_settings(oidc_scopes=["openid", "offline_access"])
+
+
+def test_production_browser_oidc_requires_https_and_a_client_secret() -> None:
+    values = {
+        "static_auth_enabled": False,
+        "runner_credentials": {},
+        "admin_credentials": {},
+        "runner_token": "",
+        "admin_token": "",
+        "oidc_issuer": "https://idp.example.com",
+        "oidc_audience": "incidentlens-api",
+        "oidc_jwks_url": "https://idp.example.com/jwks",
+        "oidc_runner_groups": ["incidentlens-runners"],
+        "oidc_authorization_url": "http://idp.example.com/authorize",
+        "oidc_token_url": "https://idp.example.com/token",
+        "oidc_client_id": "incidentlens-web",
+        "oidc_client_secret": "production-client-secret",
+        "oidc_redirect_uri": (
+            "https://incidentlens.example.com/api/v1/auth/callback"
+        ),
+    }
+    with pytest.raises(ValidationError, match="browser endpoints must use HTTPS"):
+        _production_settings(**values)
+
+    values["oidc_authorization_url"] = "https://idp.example.com/authorize"
+    values["oidc_client_secret"] = ""
+    with pytest.raises(ValidationError, match="client secret"):
+        _production_settings(**values)
+
+
+def test_browser_oidc_redirect_uri_cannot_contain_query_or_fragment() -> None:
+    with pytest.raises(ValidationError, match="redirect URI"):
+        _browser_oidc_settings(
+            oidc_redirect_uri=(
+                "https://incidentlens.example.com/api/v1/auth/callback?next=/"
+            )
+        )
 
 
 def test_oidc_configuration_requires_a_complete_trust_boundary() -> None:

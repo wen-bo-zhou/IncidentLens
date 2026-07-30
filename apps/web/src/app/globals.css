@@ -28,7 +28,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .eyebrow { color: var(--muted); font: 700 10px/1.2 var(--mono); letter-spacing: .13em; text-transform: uppercase; }
 
 .app-frame { min-height: 100vh; }
-.topbar { height: 68px; padding: 0 24px; display: grid; grid-template-columns: 260px 1fr 260px; align-items: center; background: var(--marine-deep); color: #eff8f5; border-bottom: 1px solid #31555d; }
+.topbar { height: 68px; padding: 0 24px; display: grid; grid-template-columns: 260px 1fr auto auto; gap: 16px; align-items: center; background: var(--marine-deep); color: #eff8f5; border-bottom: 1px solid #31555d; }
 .brand { display: flex; align-items: center; gap: 11px; color: inherit; text-decoration: none; }
 .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; color: #d8eeea; border: 1px solid #52737a; border-radius: 50%; position: relative; }
 .brand-mark::after { content: ""; position: absolute; inset: 5px; border: 1px dotted #6c9399; border-radius: 50%; }
@@ -41,6 +41,20 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .nav-link.active::after { content: ""; position: absolute; left: 16px; right: 16px; bottom: 0; height: 3px; background: #6aa5ff; }
 .system-status { justify-self: end; display: flex; align-items: center; gap: 8px; font: 700 10px var(--mono); color: #9ec0bc; letter-spacing: .06em; }
 .system-status span { width: 7px; height: 7px; border-radius: 50%; background: #70d6a7; box-shadow: 0 0 0 4px rgba(112,214,167,.12); }
+.session-control { min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 8px; border: 1px solid #9badaa; background: rgba(248,251,250,.72); color: var(--marine); font: 700 9px var(--mono); letter-spacing: .04em; text-decoration: none; }
+.session-control > span { min-width: 0; display: flex; flex-direction: column; }
+.session-control strong { font: 800 9px var(--mono); letter-spacing: .09em; }
+.session-control small { max-width: 150px; margin-top: 2px; overflow: hidden; color: var(--muted); font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.session-control button { width: 25px; height: 25px; margin-left: 2px; display: grid; place-items: center; border: 0; border-left: 1px solid currentColor; background: transparent; color: inherit; }
+.session-login { border-color: #75948d; background: var(--marine); color: white; }
+.session-static, .session-loading { color: var(--muted); }
+.session-static > span, .session-loading > span { width: 6px; height: 6px; min-width: 6px; border-radius: 50%; background: #9aaba7; }
+.session-loading > span { background: var(--cobalt); animation: pulse 1.3s ease-in-out infinite; }
+.session-error > span { background: var(--rust); }
+.topbar .session-control { justify-self: end; border-color: #486a72; background: #12343c; color: #d9ebe8; }
+.topbar .session-control small { color: #8fadb2; }
+.topbar .session-login { border-color: #5f89ea; background: #173c72; color: #dfe9ff; }
+.session-assurance { min-height: 37px; padding: 10px 12px; display: flex; align-items: center; gap: 7px; border-left: 3px solid #3f9b73; background: #e3f1e9; color: #236348!important; font: 700 10px var(--mono)!important; }
 .shell-body { display: grid; grid-template-columns: 286px minmax(0, 1fr); min-height: calc(100vh - 68px); }
 
 .incident-rail { background: var(--paper-deep); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: calc(100vh - 68px); }
@@ -239,6 +253,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .runner-card label { display: block; margin: 23px 0 7px; font: 700 10px var(--mono); }
 .runner-card input { width: 100%; height: 42px; padding: 0 12px; border: 1px solid #aabbb7; background: var(--paper); font: 11px var(--mono); }
 .runner-card button { width: 100%; height: 43px; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; background: var(--cobalt); color: white; font-weight: 700; }.runner-card button:disabled { opacity: .45; cursor: not-allowed; }
+.runner-card > .session-control, .operations-login > .session-control { width: 100%; margin-bottom: 12px; justify-content: center; }
 .form-error { color: var(--rust)!important; }.form-success { display: flex; gap: 5px; align-items: center; color: #28704f!important; }
 
 .operations-page { min-height: 100vh; padding: 46px clamp(22px,5vw,76px) 72px; background: var(--paper); }
@@ -319,6 +334,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 
 @media (max-width: 720px) {
   .topbar { height: 60px; padding: 0 16px; }.shell-body { display: block; }.incident-rail { min-height: auto; border-right: 0; border-bottom: 1px solid var(--line); }.rail-heading, .rail-note { display: none; }.rail-list { display: flex; overflow-x: auto; padding: 10px; }.case-card { min-width: 238px; min-height: 84px; }
+  .topbar .session-control small { max-width: 74px; }.topbar .session-static { display: none; }
   .incident-header { padding: 20px 17px; flex-direction: column; }.header-actions, .run-actions { width: 100%; align-items: stretch; }.run-actions { display: grid; grid-template-columns: 1fr 1fr; }.run-button, .replay-button { width: 100%; justify-content: center; }.severity-block { min-width: 50px; height: 54px; }.live-progress { padding: 0 16px; }
   .metric-tape { padding: 0; grid-template-columns: repeat(2,1fr); }.metric-tape > div { padding: 12px; }.metric-tape > div:nth-child(2) { border-right: 0; }.metric-tape > div:nth-child(-n+2) { border-bottom: 1px solid rgba(255,255,255,.1); }
   .causal-panel, .verdict-panel { padding: 22px 16px; }.timeline-node { grid-template-columns: 58px 42px 1fr; }.causal-spine::before { left: 78px; }

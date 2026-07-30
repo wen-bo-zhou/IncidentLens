@@ -57,4 +57,53 @@ describe("IncidentRail", () => {
       expect(screen.queryByLabelText("JSON 事故包")).not.toBeInTheDocument(),
     );
   });
+
+  it("uses an enterprise runner session to refresh the private catalog", async () => {
+    const user = userEvent.setup();
+    const unlockCatalog = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IncidentRail
+        incidents={[]}
+        onSelect={vi.fn()}
+        loading={false}
+        onUnlockCatalog={unlockCatalog}
+        sessionRole="runner"
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "刷新私有目录" }),
+    );
+
+    expect(unlockCatalog).toHaveBeenCalledWith("");
+    expect(
+      screen.queryByLabelText("Runner / Admin 令牌"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("uses an enterprise admin session to import without a token field", async () => {
+    const user = userEvent.setup();
+    const importIncident = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IncidentRail
+        incidents={[]}
+        onSelect={vi.fn()}
+        loading={false}
+        onImportIncident={importIncident}
+        sessionRole="admin"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "导入事故包" }));
+    const file = new File(["{}"], "incident.json", {
+      type: "application/json",
+    });
+    await user.upload(screen.getByLabelText("JSON 事故包"), file);
+    expect(screen.queryByLabelText("管理员令牌")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认导入" }));
+
+    await waitFor(() =>
+      expect(importIncident).toHaveBeenCalledWith(file, ""),
+    );
+  });
 });

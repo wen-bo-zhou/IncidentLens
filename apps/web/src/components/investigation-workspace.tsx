@@ -21,6 +21,7 @@ import { FormEvent, useMemo, useState } from "react";
 
 import { MetricEvidenceChart, TraceWaterfall } from "@/components/evidence-visuals";
 import type {
+  AuthSession,
   EvidenceRef,
   IncidentCase,
   InvestigationReport,
@@ -39,6 +40,7 @@ interface InvestigationWorkspaceProps {
   liveEventCount?: number;
   remediationProposals?: RemediationProposal[];
   onApproveRemediation?: (proposalId: string, adminToken: string) => Promise<void>;
+  sessionRole?: AuthSession["role"];
 }
 
 const kindLabels = { log: "LOG", metric: "METRIC", trace: "TRACE", runbook: "RUNBOOK" };
@@ -94,10 +96,12 @@ function LiveRunDialog({
   incident,
   onClose,
   onRun,
+  useSession,
 }: {
   incident: IncidentCase;
   onClose: () => void;
   onRun: (runnerToken: string, window: InvestigationWindow) => Promise<void>;
+  useSession: boolean;
 }) {
   const [token, setToken] = useState("");
   const [startAt, setStartAt] = useState(
@@ -142,16 +146,26 @@ function LiveRunDialog({
           <div><span className="eyebrow">Bounded live run</span><h2>启动实时调查</h2></div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭实时调查"><X size={18} /></button>
         </header>
-        <p>实时模式会调用受限调查 Worker。令牌仅保存在当前页面内存中，不会写入浏览器存储。</p>
-        <label htmlFor="runner-token">Runner 令牌</label>
-        <input
-          id="runner-token"
-          type="password"
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
-          placeholder="runner-demo-token"
-          autoFocus
-        />
+        <p>
+          实时模式会调用受限调查 Worker，并受每日额度和审计策略约束。
+        </p>
+        {useSession ? (
+          <p className="session-assurance">
+            <ShieldCheck size={15} /> 企业 Runner 会话已验证
+          </p>
+        ) : (
+          <>
+            <label htmlFor="runner-token">Runner 令牌</label>
+            <input
+              id="runner-token"
+              type="password"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="runner-demo-token"
+              autoFocus
+            />
+          </>
+        )}
         <div className="time-window-fields">
           <div>
             <label htmlFor="investigation-start">开始时间（UTC）</label>
@@ -175,7 +189,10 @@ function LiveRunDialog({
           </div>
         </div>
         {error && <p className="form-error">{error}</p>}
-        <button className="run-button" disabled={!token || submitting}>
+        <button
+          className="run-button"
+          disabled={(!useSession && !token) || submitting}
+        >
           {submitting ? "正在排队" : "确认启动"}
         </button>
       </form>
@@ -198,10 +215,12 @@ function ApprovalDialog({
   proposal,
   onClose,
   onApprove,
+  useSession,
 }: {
   proposal: RemediationProposal;
   onClose: () => void;
   onApprove: (proposalId: string, adminToken: string) => Promise<void>;
+  useSession: boolean;
 }) {
   const [token, setToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -226,10 +245,18 @@ function ApprovalDialog({
       <form className="live-dialog approval-dialog" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
         <header><div><span className="eyebrow">Human approval</span><h2>批准沙箱模拟</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭处置审批"><X size={18} /></button></header>
         <p><strong>{proposal.title}</strong><br />审批只会触发预定义虚拟动作，不会生成或执行 Shell、SQL。</p>
-        <label htmlFor="admin-approval-token">管理员令牌</label>
-        <input id="admin-approval-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="admin-demo-token" autoFocus />
+        {useSession ? (
+          <p className="session-assurance">
+            <ShieldCheck size={15} /> 企业 Admin 会话已验证
+          </p>
+        ) : (
+          <>
+            <label htmlFor="admin-approval-token">管理员令牌</label>
+            <input id="admin-approval-token" type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="admin-demo-token" autoFocus />
+          </>
+        )}
         {error && <p className="form-error">{error}</p>}
-        <button className="run-button" disabled={!token || submitting}>{submitting ? "模拟执行中" : "批准并模拟"}</button>
+        <button className="run-button" disabled={(!useSession && !token) || submitting}>{submitting ? "模拟执行中" : "批准并模拟"}</button>
       </form>
     </div>
   );
@@ -246,6 +273,7 @@ export function InvestigationWorkspace({
   liveEventCount = 0,
   remediationProposals = [],
   onApproveRemediation,
+  sessionRole = "guest",
 }: InvestigationWorkspaceProps) {
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
   const [showLiveDialog, setShowLiveDialog] = useState(false);
@@ -475,6 +503,7 @@ export function InvestigationWorkspace({
           incident={incident}
           onClose={() => setShowLiveDialog(false)}
           onRun={onRunLive}
+          useSession={sessionRole === "runner" || sessionRole === "admin"}
         />
       )}
       {approvalProposal && onApproveRemediation && (
@@ -482,6 +511,7 @@ export function InvestigationWorkspace({
           proposal={approvalProposal}
           onClose={() => setApprovalProposal(undefined)}
           onApprove={onApproveRemediation}
+          useSession={sessionRole === "admin"}
         />
       )}
     </main>

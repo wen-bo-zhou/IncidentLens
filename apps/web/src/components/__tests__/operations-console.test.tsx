@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OperationsConsole } from "@/components/operations-console";
+import { useAuth } from "@/components/auth-context";
 import { api } from "@/lib/api";
 
 vi.mock("@/lib/api", () => ({
@@ -11,6 +12,9 @@ vi.mock("@/lib/api", () => ({
     investigationHistory: vi.fn(),
     auditEvents: vi.fn(),
   },
+}));
+vi.mock("@/components/auth-context", () => ({
+  useAuth: vi.fn(),
 }));
 
 function renderConsole() {
@@ -27,6 +31,7 @@ function renderConsole() {
 
 describe("OperationsConsole", () => {
   const mockedApi = vi.mocked(api);
+  const mockedUseAuth = vi.mocked(useAuth);
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -60,6 +65,17 @@ describe("OperationsConsole", () => {
       total: 1,
       limit: 20,
       offset: 0,
+    });
+    mockedUseAuth.mockReturnValue({
+      session: {
+        authenticated: false,
+        sso_enabled: false,
+        role: "guest",
+        actor: null,
+      },
+      isLoading: false,
+      error: null,
+      logout: vi.fn(),
     });
   });
 
@@ -125,5 +141,36 @@ describe("OperationsConsole", () => {
     expect(
       queryClient.getQueryCache().findAll({ queryKey: ["operations"] }),
     ).toHaveLength(0);
+  });
+
+  it("opens automatically for an enterprise admin session", async () => {
+    mockedUseAuth.mockReturnValue({
+      session: {
+        authenticated: true,
+        sso_enabled: true,
+        role: "admin",
+        actor: "oidc-admin",
+      },
+      isLoading: false,
+      error: null,
+      logout: vi.fn(),
+    });
+
+    renderConsole();
+
+    expect(
+      await screen.findByRole("heading", { name: "发布配置导致支付超时。" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("管理员令牌")).not.toBeInTheDocument();
+    expect(mockedApi.investigationHistory).toHaveBeenCalledWith(undefined, {
+      status: undefined,
+      limit: 20,
+      offset: 0,
+    });
+    expect(mockedApi.auditEvents).toHaveBeenCalledWith(undefined, {
+      action: undefined,
+      limit: 20,
+      offset: 0,
+    });
   });
 });

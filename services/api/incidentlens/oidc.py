@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from base64 import urlsafe_b64encode
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from hashlib import sha256
+from secrets import compare_digest
 from threading import Lock
 from time import monotonic
 from typing import Any, cast
@@ -22,6 +25,23 @@ _MAX_JWKS_BYTES = 1_000_000
 _MAX_JWKS_KEYS = 100
 _MAX_TOKEN_BYTES = 16_384
 _JWKS_TOTAL_DEADLINE_SECONDS = 3.0
+
+
+def _constant_time_text_equal(left: str, right: str) -> bool:
+    return compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class VerifiedAccessToken:
+    principal: Principal
+    subject: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class VerifiedIdToken:
+    subject: str
+    expires_at: datetime
 
 
 class OidcTokenVerifier:
@@ -53,6 +73,10 @@ class OidcTokenVerifier:
             self._http_client.close()
 
     def verify(self, token: str) -> Principal | None:
+        verified = self.verify_for_session(token)
+        return verified.principal if verified is not None else None
+
+    def verify_for_session(self, token: str) -> VerifiedAccessToken | None:
         if len(token.encode("utf-8")) > _MAX_TOKEN_BYTES or token.count(".") != 2:
             return None
         try:
@@ -92,7 +116,120 @@ class OidcTokenVerifier:
             )
         except InvalidTokenError:
             return None
-        return self._principal_from_claims(claims)
+        principal = self._principal_from_claims(claims)
+        subject = claims.get("sub")
+        expires_at = claims.get("exp")
+        if (
+            principal is None
+            or not isinstance(subject, str)
+            or not isinstance(expires_at, (int, float))
+            or isinstance(expires_at, bool)
+        ):
+            return None
+        return VerifiedAccessToken(
+            principal=principal,
+            subject=subject,
+            expires_at=datetime.fromtimestamp(expires_at, UTC),
+        )
+
+    def verify_id_token(
+        self,
+        token: str,
+        *,
+        nonce: str,
+        access_token: str,
+        expected_subject: str,
+    ) -> VerifiedIdToken | None:
+        if (
+            not self.settings.oidc_browser_enabled
+            or len(token.encode("utf-8")) > _MAX_TOKEN_BYTES
+            or token.count(".") != 2
+        ):
+            return None
+        try:
+            header = jwt.get_unverified_header(token)
+        except InvalidTokenError:
+            return None
+        token_type = header.get("typ")
+        if (
+            header.get("alg") != _ALGORITHM
+            or (
+                token_type is not None
+                and str(token_type).lower() != "jwt"
+            )
+            or any(name in header for name in ("jku", "jwk", "x5u", "x5c"))
+        ):
+            return None
+        kid = header.get("kid")
+        if not isinstance(kid, str) or not 1 <= len(kid) <= 128:
+            return None
+        key = self._signing_key(kid)
+        if key is None:
+            return None
+        try:
+            claims = jwt.decode(
+                token,
+                key=key,
+                algorithms=[_ALGORITHM],
+                audience=self.settings.oidc_client_id,
+                issuer=self.settings.oidc_issuer,
+                leeway=30,
+                options={
+                    "require": ["iss", "sub", "aud", "iat", "exp", "nonce"],
+                    "verify_signature": True,
+                    "verify_exp": True,
+                    "verify_iat": True,
+                    "verify_nbf": True,
+                    "verify_iss": True,
+                    "verify_aud": True,
+                    "verify_sub": True,
+                },
+            )
+        except InvalidTokenError:
+            return None
+        subject = claims.get("sub")
+        token_nonce = claims.get("nonce")
+        expires_at = claims.get("exp")
+        audience = claims.get("aud")
+        authorized_party = claims.get("azp")
+        if (
+            not isinstance(subject, str)
+            or not _constant_time_text_equal(subject, expected_subject)
+            or not isinstance(token_nonce, str)
+            or not _constant_time_text_equal(token_nonce, nonce)
+            or not isinstance(expires_at, (int, float))
+            or isinstance(expires_at, bool)
+            or (
+                isinstance(audience, list)
+                and len(audience) > 1
+                and authorized_party is None
+            )
+            or (
+                authorized_party is not None
+                and authorized_party != self.settings.oidc_client_id
+            )
+        ):
+            return None
+        token_at_hash = claims.get("at_hash")
+        if token_at_hash is not None:
+            digest = sha256(access_token.encode()).digest()
+            expected_at_hash = (
+                urlsafe_b64encode(digest[: len(digest) // 2])
+                .rstrip(b"=")
+                .decode("ascii")
+            )
+            if (
+                not isinstance(token_at_hash, str)
+                or not _constant_time_text_equal(
+                    token_at_hash,
+                    expected_at_hash,
+                )
+            ):
+                return None
+        return VerifiedIdToken(
+            subject=subject,
+            expires_at=datetime.fromtimestamp(expires_at, UTC),
+        )
 
     def _signing_key(self, kid: str) -> PyJWK | None:
         now = self._clock()

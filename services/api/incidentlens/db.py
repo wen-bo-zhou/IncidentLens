@@ -36,6 +36,7 @@ from sqlalchemy.orm import (
 )
 from sqlalchemy.pool import StaticPool
 
+from incidentlens.auth import Principal, Role
 from incidentlens.retrieval import EMBEDDING_DIMENSIONS, deterministic_embedding
 from incidentlens.schemas import IncidentCase, WorkflowEvent, WorkflowResult
 
@@ -145,6 +146,40 @@ class AuthFailureLimitRecord(Base):
     )
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+
+
+class OidcLoginTransactionRecord(Base):
+    __tablename__ = "oidc_login_transactions"
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    browser_hash: Mapped[str] = mapped_column(String(64), index=True)
+    client_hash: Mapped[str] = mapped_column(String(64), index=True)
+    code_verifier: Mapped[str] = mapped_column(String(128))
+    nonce: Mapped[str] = mapped_column(String(128))
+    return_to: Mapped[str] = mapped_column(String(200))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdmissionControlRecord(Base):
+    __tablename__ = "admission_control"
+
+    lock_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
+class BrowserSessionRecord(Base):
+    __tablename__ = "browser_sessions"
+
+    session_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor: Mapped[str] = mapped_column(String(80))
+    role: Mapped[str] = mapped_column(String(16))
+    identity_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class IncidentPackageRecord(Base):
@@ -379,59 +414,247 @@ class InvestigationStore:
         now: datetime,
         window_seconds: int,
         limit: int,
+        max_records: int = 10000,
     ) -> tuple[bool, int]:
         if now.utcoffset() is None:
             raise ValueError("Rate-limit timestamp must include a timezone")
+        if window_seconds < 1 or limit < 1 or max_records < 1:
+            raise ValueError("Rate-limit bounds must be positive")
         bucket_epoch = int(now.timestamp()) // window_seconds * window_seconds
         bucket_start = datetime.fromtimestamp(bucket_epoch, UTC)
         bucket_end = bucket_start + timedelta(seconds=window_seconds)
         retry_after = max(1, ceil((bucket_end - now).total_seconds()))
-        stale_before = bucket_start - timedelta(seconds=window_seconds * 2)
-
+        self._ensure_admission_control()
         with self.session_factory() as session:
             session.execute(
+                select(AdmissionControlRecord)
+                .where(AdmissionControlRecord.lock_id == 1)
+                .with_for_update()
+            ).scalar_one()
+            session.execute(
                 delete(AuthFailureLimitRecord).where(
-                    AuthFailureLimitRecord.bucket_start < stale_before
+                    AuthFailureLimitRecord.expires_at <= now
                 )
             )
-            if (
-                session.get(AuthFailureLimitRecord, (subject_hash, bucket_start))
-                is None
-            ):
+            record = session.get(
+                AuthFailureLimitRecord,
+                (subject_hash, bucket_start),
+            )
+            if record is None:
+                record_count = session.scalar(
+                    select(func.count()).select_from(AuthFailureLimitRecord)
+                )
+                if record_count is None or record_count >= max_records:
+                    session.commit()
+                    return False, retry_after
                 session.add(
                     AuthFailureLimitRecord(
                         subject_hash=subject_hash,
                         bucket_start=bucket_start,
-                        failure_count=0,
+                        failure_count=1,
                         updated_at=now,
+                        expires_at=bucket_end,
                     )
                 )
-                try:
-                    session.commit()
-                except IntegrityError:
-                    session.rollback()
-        with self.session_factory() as session:
-            result = cast(
-                CursorResult[Any],
-                session.execute(
-                    update(AuthFailureLimitRecord)
-                    .where(
-                        AuthFailureLimitRecord.subject_hash == subject_hash,
-                        AuthFailureLimitRecord.bucket_start == bucket_start,
-                        AuthFailureLimitRecord.failure_count < limit,
-                    )
-                    .values(
-                        failure_count=AuthFailureLimitRecord.failure_count + 1,
-                        updated_at=now,
-                    )
-                ),
-            )
+                session.commit()
+                return True, retry_after
+            if record.failure_count >= limit:
+                session.commit()
+                return False, retry_after
+            record.failure_count += 1
+            record.updated_at = now
             session.commit()
-            return result.rowcount == 1, retry_after
+            return True, retry_after
 
     def ping(self) -> None:
         with self.session_factory() as session:
             session.execute(select(1))
+
+    def create_oidc_login(
+        self,
+        *,
+        state: str,
+        browser_token: str,
+        client_hash: str,
+        code_verifier: str,
+        nonce: str,
+        return_to: str,
+        now: datetime,
+        expires_at: datetime,
+        max_outstanding: int,
+        max_outstanding_per_client: int,
+    ) -> bool:
+        if now.utcoffset() is None or expires_at.utcoffset() is None:
+            raise ValueError("OIDC login timestamps must include a timezone")
+        if len(client_hash) != 64:
+            raise ValueError("OIDC login client hash must be a SHA-256 digest")
+        if (
+            max_outstanding < 1
+            or max_outstanding_per_client < 1
+            or max_outstanding_per_client > max_outstanding
+        ):
+            raise ValueError("OIDC login pending limits are invalid")
+        state_hash = sha256(state.encode()).hexdigest()
+        browser_hash = sha256(browser_token.encode()).hexdigest()
+        self._ensure_admission_control()
+        with self.session_factory() as session:
+            session.execute(
+                select(AdmissionControlRecord)
+                .where(AdmissionControlRecord.lock_id == 1)
+                .with_for_update()
+            ).scalar_one()
+            session.execute(
+                delete(OidcLoginTransactionRecord).where(
+                    OidcLoginTransactionRecord.expires_at <= now
+                )
+            )
+            total_outstanding = session.scalar(
+                select(func.count()).select_from(OidcLoginTransactionRecord)
+            )
+            client_outstanding = session.scalar(
+                select(func.count())
+                .select_from(OidcLoginTransactionRecord)
+                .where(OidcLoginTransactionRecord.client_hash == client_hash)
+            )
+            if (
+                total_outstanding is None
+                or client_outstanding is None
+                or total_outstanding >= max_outstanding
+                or client_outstanding >= max_outstanding_per_client
+            ):
+                session.commit()
+                return False
+            session.add(
+                OidcLoginTransactionRecord(
+                    state_hash=state_hash,
+                    browser_hash=browser_hash,
+                    client_hash=client_hash,
+                    code_verifier=code_verifier,
+                    nonce=nonce,
+                    return_to=return_to,
+                    expires_at=expires_at,
+                    created_at=now,
+                )
+            )
+            session.commit()
+        return True
+
+    def _ensure_admission_control(self) -> None:
+        with self.session_factory() as session:
+            if session.get(AdmissionControlRecord, 1) is None:
+                session.add(AdmissionControlRecord(lock_id=1))
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+
+    def consume_oidc_login(
+        self,
+        *,
+        state: str,
+        browser_token: str,
+        now: datetime,
+    ) -> dict[str, str] | None:
+        if now.utcoffset() is None:
+            raise ValueError("OIDC login timestamp must include a timezone")
+        result = None
+        with self.session_factory() as session:
+            result = session.execute(
+                delete(OidcLoginTransactionRecord)
+                .where(
+                    OidcLoginTransactionRecord.state_hash
+                    == sha256(state.encode()).hexdigest(),
+                    OidcLoginTransactionRecord.browser_hash
+                    == sha256(browser_token.encode()).hexdigest(),
+                    OidcLoginTransactionRecord.expires_at > now,
+                )
+                .returning(
+                    OidcLoginTransactionRecord.code_verifier,
+                    OidcLoginTransactionRecord.nonce,
+                    OidcLoginTransactionRecord.return_to,
+                )
+            ).one_or_none()
+            session.commit()
+        if result is None:
+            return None
+        return {
+            "code_verifier": result.code_verifier,
+            "nonce": result.nonce,
+            "return_to": result.return_to,
+        }
+
+    def create_browser_session(
+        self,
+        principal: Principal,
+        *,
+        now: datetime,
+        expires_at: datetime,
+    ) -> str:
+        if now.utcoffset() is None or expires_at.utcoffset() is None:
+            raise ValueError("Browser session timestamps must include a timezone")
+        if principal.token_hash is None:
+            raise ValueError("Browser sessions require a stable identity hash")
+        session_token = token_urlsafe(32)
+        with self.session_factory() as session:
+            session.execute(
+                delete(BrowserSessionRecord).where(
+                    BrowserSessionRecord.expires_at <= now
+                )
+            )
+            session.add(
+                BrowserSessionRecord(
+                    session_hash=sha256(session_token.encode()).hexdigest(),
+                    actor=principal.actor,
+                    role=principal.role,
+                    identity_hash=principal.token_hash,
+                    expires_at=expires_at,
+                    created_at=now,
+                )
+            )
+            session.commit()
+        return session_token
+
+    def authenticate_browser_session(
+        self,
+        session_token: str,
+        *,
+        now: datetime,
+    ) -> Principal | None:
+        if now.utcoffset() is None:
+            raise ValueError("Browser session timestamp must include a timezone")
+        session_hash = sha256(session_token.encode()).hexdigest()
+        with self.session_factory() as session:
+            record = session.get(BrowserSessionRecord, session_hash)
+            if record is None:
+                return None
+            expires_at = record.expires_at
+            if expires_at.utcoffset() is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at <= now:
+                session.delete(record)
+                session.commit()
+                return None
+            if record.role not in ("runner", "admin"):
+                return None
+            return Principal(
+                role=cast(Role, record.role),
+                actor=record.actor,
+                token_hash=record.identity_hash,
+            )
+
+    def revoke_browser_session(self, session_token: str) -> bool:
+        with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    delete(BrowserSessionRecord).where(
+                        BrowserSessionRecord.session_hash
+                        == sha256(session_token.encode()).hexdigest()
+                    )
+                ),
+            )
+            session.commit()
+            return result.rowcount == 1
 
     def issue_stream_ticket(
         self,

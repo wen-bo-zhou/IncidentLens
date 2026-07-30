@@ -8,12 +8,17 @@
 - Readiness: `GET /health/ready`
 - Metrics: `GET /metrics`
 - API schema: `GET /api/v1/openapi.json`
+- Session state: `GET /api/v1/auth/session`
+- Browser login: `GET /api/v1/auth/login`
+- OIDC callback: `GET /api/v1/auth/callback`
+- Session logout: `POST /api/v1/auth/logout`
 
 ## Operations console and governance APIs
 
-Open `/operations` and provide an administrator token to inspect the durable
-investigation and audit ledgers. The browser keeps the token in component memory
-only; refreshing or leaving the page clears it.
+Open `/operations` with an enterprise Admin session to inspect the durable
+investigation and audit ledgers. When browser SSO is disabled or unavailable,
+a separately managed administrator token remains available as an in-memory
+break-glass path; refreshing or leaving the page clears it.
 
 - Investigation history: `GET /api/v1/investigations` (runner or admin)
 - Investigation detail: `GET /api/v1/investigations/{id}` (runner or admin)
@@ -45,7 +50,8 @@ are intentionally visible only to administrators.
 Stream tickets live for five minutes and are scoped to one investigation.
 `investigation_stream_tickets` stores only their SHA-256 digests. Ticket
 issuance is recorded as `investigation.stream_ticket_issued` without the raw
-value. The API redacts the `ticket` query parameter from Uvicorn access logs;
+value. The API redacts `ticket`, OIDC `code` and OIDC `state` query parameters
+from Uvicorn access logs;
 configure any additional public reverse-proxy logs to do the same.
 
 ## Production access configuration
@@ -66,6 +72,14 @@ OIDC_JWKS_URL=https://idp.example.com/.well-known/jwks.json
 OIDC_GROUPS_CLAIM=groups
 OIDC_RUNNER_GROUPS=["incidentlens-runners"]
 OIDC_ADMIN_GROUPS=["incidentlens-admins"]
+OIDC_AUTHORIZATION_URL=https://idp.example.com/oauth2/authorize
+OIDC_TOKEN_URL=https://idp.example.com/oauth2/token
+OIDC_CLIENT_ID=incidentlens-web
+OIDC_CLIENT_SECRET=replace-with-secret-manager-value
+OIDC_REDIRECT_URI=https://incidentlens.example.com/api/v1/auth/callback
+OIDC_SCOPES=["openid","profile"]
+OIDC_LOGIN_TTL_SECONDS=600
+OIDC_SESSION_TTL_SECONDS=28800
 ```
 
 The API accepts only RS256-signed `at+jwt` access tokens containing `iss`,
@@ -84,10 +98,55 @@ set, authenticated requests fail closed with HTTP 503 and `Retry-After: 30`;
 these infrastructure failures do not consume the per-client invalid-credential
 allowance.
 
+The browser flow is a confidential OIDC Authorization Code client with PKCE
+S256. Register the redirect URI exactly; query strings and fragments are
+rejected. Production authorization, token and redirect URLs must use HTTPS and
+the client secret must come from the deployment secret manager. The token
+endpoint is called without redirects, with a short per-read timeout, a five
+second total deadline and a 1 MB response cap. IncidentLens requires an access
+token and ID token, validates signatures, issuer, both audiences, expiry,
+nonce, subject consistency and `at_hash` when present, and does not persist
+either token or any refresh token.
+
+The short-lived login transaction stores only state and browser-binding
+digests; its PKCE verifier and nonce expire after at most 15 minutes and are
+consumed once. Successful login creates an opaque random session whose database
+row contains only a session digest, stable actor, role, identity digest and
+absolute expiry. The browser cookie is `HttpOnly`, `SameSite=Strict`,
+`Path=/`, has no `Domain`, and is `Secure` in production. Cookie-authenticated
+`POST`, `PUT`, `PATCH` and `DELETE` requests require
+`X-IncidentLens-CSRF: 1`. Explicit Bearer authorization always takes
+precedence and an invalid Bearer token never falls back to a valid cookie.
+
+`OIDC_LOGIN_RATE_LIMIT` and `OIDC_LOGIN_RATE_WINDOW_SECONDS` limit login starts
+per HMAC-derived client identity across every API replica.
+`OIDC_LOGIN_MAX_OUTSTANDING` and
+`OIDC_LOGIN_MAX_OUTSTANDING_PER_CLIENT` bound unexpired login transactions;
+defaults are 5,000 globally and 10 per client. Ingress rate limiting remains a
+recommended outer layer.
+`RATE_LIMIT_MAX_RECORDS` separately hard-caps the shared durable client-bucket
+table (10,000 by default), preventing address rotation from converting the
+per-client limiter into unbounded database growth. When capacity is reached,
+previously unseen client buckets fail closed with HTTP 429 until stale buckets
+are removed. Every bucket stores its actual window expiry and is reclaimed
+before the cap is evaluated, so a one-minute login bucket cannot occupy
+capacity for a longer authentication window.
+
+Browser-session roles are snapshots of the validated login tokens. Normal IdP
+group removals take effect when the session expires (eight hours by default) or
+after logout. For emergency revocation, delete the affected rows from
+`browser_sessions` by `identity_hash`; deleting every row revokes all browser
+sessions. Perform the database change through the normal audited operations
+procedure, then rotate or disable the IdP client if its trust boundary changed.
+
+Web and API must share one public origin. The provided Next.js rewrite and
+Caddy routing satisfy this boundary. If a separate frontend origin is required,
+do not enable browser SSO until redirects, cookie scope and CSRF controls are
+redesigned and reviewed.
+
 Leave `STATIC_AUTH_ENABLED=true` only when separately managed static
-credentials are required for break-glass access. The current web console
-accepts an IdP access token in its Runner/Admin token fields; interactive
-authorization-code login is a separate deployment/client concern.
+credentials are required for break-glass access. Set it to `false` to require
+OIDC for all non-guest access.
 
 For one credential per role, set unique `RUNNER_TOKEN` and `ADMIN_TOKEN`
 values. For multiple operators, use JSON maps; a non-empty map replaces the

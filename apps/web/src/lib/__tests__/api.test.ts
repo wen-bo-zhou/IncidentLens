@@ -9,6 +9,14 @@ function jsonResponse(value: unknown) {
   } as unknown as Response;
 }
 
+function emptyResponse() {
+  return {
+    ok: true,
+    status: 204,
+    json: vi.fn(),
+  } as unknown as Response;
+}
+
 describe("api", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -131,7 +139,11 @@ describe("api", () => {
       "/api/v1/incidents/import",
       expect.objectContaining({
         method: "POST",
-        headers: { Authorization: "Bearer admin-token" },
+        credentials: "include",
+        headers: {
+          Authorization: "Bearer admin-token",
+          "X-IncidentLens-CSRF": "1",
+        },
         body: expect.any(FormData),
       }),
     );
@@ -175,5 +187,56 @@ describe("api", () => {
         }),
       }),
     );
+  });
+
+  it("uses the browser session cookie and CSRF header without exposing a bearer token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        investigation_id: "inv-1",
+        status: "queued",
+        mode: "live",
+        idempotent_replay: false,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.createInvestigation("case-1", "", "request-1", {
+      startAt: "2026-01-10T09:00:00Z",
+      endAt: "2026-01-10T10:00:00Z",
+    });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(init.credentials).toBe("include");
+    expect(headers.get("X-IncidentLens-CSRF")).toBe("1");
+    expect(headers.has("Authorization")).toBe(false);
+  });
+
+  it("reads the server session and handles a no-content logout", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          sso_enabled: true,
+          role: "admin",
+          actor: "oidc-admin",
+        }),
+      )
+      .mockResolvedValueOnce(emptyResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.session();
+    await api.logout();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/auth/session",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    const logoutInit = fetchMock.mock.calls[1][1] as RequestInit;
+    expect(logoutInit.method).toBe("POST");
+    expect(logoutInit.credentials).toBe("include");
+    expect(new Headers(logoutInit.headers).get("X-IncidentLens-CSRF")).toBe("1");
   });
 });

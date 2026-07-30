@@ -39,11 +39,32 @@ credentials can be disabled completely when OIDC is configured. An unavailable
 or malformed JWKS source fails closed with HTTP 503 and `Retry-After` without
 charging the client's invalid-credential limit.
 
+Browser SSO uses IncidentLens as a same-origin backend-for-frontend. The login
+endpoint creates a browser-bound, one-time transaction and redirects to the IdP
+with Authorization Code, PKCE S256 and a nonce. The callback atomically
+consumes that transaction, exchanges the code as a confidential client, and
+validates both the API access token and ID token. Issuer, audience, signature,
+time, nonce, subject and access-token binding must all agree. IdP tokens and
+refresh tokens are then discarded.
+
+The browser receives only an opaque host-only session cookie. The database
+stores its SHA-256 digest with the stable OIDC actor, role, identity digest and
+absolute expiry; session lifetime is capped by both configured TTL and token
+expiry. `SameSite=Strict`, `HttpOnly`, production `Secure`, exact-origin CORS,
+custom-header CSRF checks and Bearer-over-Cookie precedence form the browser
+request boundary. Static credentials remain optional and isolated as
+break-glass access.
+
 Invalid supplied credentials pass through a database-backed fixed-window
 limiter before route dispatch. Client addresses are derived from
 `X-Forwarded-For` only when the direct peer belongs to `TRUSTED_PROXY_CIDRS`;
 the database key is an HMAC digest rather than a raw address. The atomic
 conditional update keeps the limit consistent across API workers.
+Browser login starts use the same durable, privacy-preserving client identity.
+A database admission lock serializes rate-limit storage cardinality checks,
+expired-row cleanup, global and per-client pending-count checks, and
+transaction insertion. Both the rate-limit table and login transaction table
+therefore have hard bounds under distributed request floods.
 
 Every newly created investigation persists the principal actor as its owner.
 Runner history, detail reads, stream-ticket issuance and cancellation are

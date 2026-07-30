@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useState } from "react";
 
-import type { IncidentCase } from "@/lib/types";
+import type { AuthSession, IncidentCase } from "@/lib/types";
 
 const familyIcons = {
   deployment_config: Box,
@@ -26,6 +26,7 @@ interface IncidentRailProps {
   onImportIncident?: (file: File, adminToken: string) => Promise<void>;
   onUnlockCatalog?: (token: string) => Promise<void>;
   catalogUnlocked?: boolean;
+  sessionRole?: AuthSession["role"];
 }
 
 function CatalogAccessDialog({
@@ -99,9 +100,11 @@ function CatalogAccessDialog({
 function ImportIncidentDialog({
   onClose,
   onImport,
+  useSession,
 }: {
   onClose: () => void;
   onImport: (file: File, adminToken: string) => Promise<void>;
+  useSession: boolean;
 }) {
   const [file, setFile] = useState<File>();
   const [token, setToken] = useState("");
@@ -146,18 +149,29 @@ function ImportIncidentDialog({
           onChange={(event) => setFile(event.target.files?.[0])}
           required
         />
-        <label htmlFor="incident-import-token">管理员令牌</label>
-        <input
-          id="incident-import-token"
-          type="password"
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
-          placeholder="admin-demo-token"
-          autoComplete="off"
-          required
-        />
+        {useSession ? (
+          <p className="session-assurance">
+            企业 Admin 会话已验证，导入动作会写入审计记录。
+          </p>
+        ) : (
+          <>
+            <label htmlFor="incident-import-token">管理员令牌</label>
+            <input
+              id="incident-import-token"
+              type="password"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="admin-demo-token"
+              autoComplete="off"
+              required
+            />
+          </>
+        )}
         {error && <p className="form-error">{error}</p>}
-        <button className="run-button" disabled={!file || !token || submitting}>
+        <button
+          className="run-button"
+          disabled={!file || (!useSession && !token) || submitting}
+        >
           {submitting ? "正在校验" : "确认导入"}
         </button>
       </form>
@@ -173,9 +187,12 @@ export function IncidentRail({
   onImportIncident,
   onUnlockCatalog,
   catalogUnlocked = false,
+  sessionRole = "guest",
 }: IncidentRailProps) {
   const [showImport, setShowImport] = useState(false);
   const [showCatalog, setShowCatalog] = useState(false);
+  const hasCatalogSession =
+    sessionRole === "runner" || sessionRole === "admin";
   return (
     <aside className="incident-rail" aria-label="事故演练列表">
       <div className="rail-heading">
@@ -214,15 +231,27 @@ export function IncidentRail({
         <div className="rail-actions">
           {onUnlockCatalog && (
             <button
-              className={`rail-catalog-button ${catalogUnlocked ? "unlocked" : ""}`}
-              onClick={() => setShowCatalog(true)}
+              className={`rail-catalog-button ${
+                catalogUnlocked || hasCatalogSession ? "unlocked" : ""
+              }`}
+              onClick={() => {
+                if (hasCatalogSession) {
+                  void onUnlockCatalog("");
+                } else {
+                  setShowCatalog(true);
+                }
+              }}
             >
-              {catalogUnlocked ? (
+              {catalogUnlocked || hasCatalogSession ? (
                 <UnlockKeyhole size={14} />
               ) : (
                 <LockKeyhole size={14} />
               )}
-              {catalogUnlocked ? "私有目录已解锁" : "打开私有目录"}
+              {hasCatalogSession
+                ? "刷新私有目录"
+                : catalogUnlocked
+                  ? "私有目录已解锁"
+                  : "打开私有目录"}
             </button>
           )}
           {onImportIncident && (
@@ -241,6 +270,7 @@ export function IncidentRail({
         <ImportIncidentDialog
           onClose={() => setShowImport(false)}
           onImport={onImportIncident}
+          useSession={sessionRole === "admin"}
         />
       )}
       {showCatalog && onUnlockCatalog && (

@@ -11,8 +11,10 @@ import {
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+import { useAuth } from "@/components/auth-context";
 import { IncidentRail } from "@/components/incident-rail";
 import { InvestigationWorkspace } from "@/components/investigation-workspace";
+import { SessionControl } from "@/components/session-control";
 import { api } from "@/lib/api";
 import type {
   InvestigationReport,
@@ -36,11 +38,15 @@ const streamedEventTypes: WorkflowEventType[] = [
 const terminalStatuses = new Set(["completed", "failed", "canceled", "inconclusive"]);
 
 export function AppShell() {
+  const { session } = useAuth();
   const [privateIncidents, setPrivateIncidents] = useState<
     Awaited<ReturnType<typeof api.incidents>>
   >();
   const incidentsQuery = useQuery({
-    queryKey: ["incidents", "public"],
+    queryKey: [
+      "incidents",
+      session.authenticated ? session.actor : "public",
+    ],
     queryFn: () => api.incidents(),
   });
   const [chosenId, setChosenId] = useState<string>();
@@ -207,6 +213,7 @@ export function AppShell() {
           <Link className="nav-link" href="/evaluations"><FlaskConical size={15} />评测</Link>
           <Link className="nav-link" href="/operations"><ClipboardList size={15} />运营</Link>
         </nav>
+        <SessionControl returnTo="/" />
         <div className="system-status"><span />DEMO REPLAY · HEALTHY</div>
       </header>
 
@@ -218,7 +225,10 @@ export function AppShell() {
           loading={incidentsQuery.isLoading}
           onImportIncident={importIncident}
           onUnlockCatalog={unlockCatalog}
-          catalogUnlocked={privateIncidents !== undefined}
+          catalogUnlocked={
+            privateIncidents !== undefined || session.authenticated
+          }
+          sessionRole={session.role}
         />
         {incidentsQuery.error ? (
           <main className="connection-error">
@@ -245,6 +255,7 @@ export function AppShell() {
             liveEventCount={liveEvents.length}
             remediationProposals={remediations}
             onApproveRemediation={approveRemediation}
+            sessionRole={session.role}
           />
         ) : (
           <main className="workspace"><div className="report-empty"><div className="scanner" /><h2>正在读取事故演练</h2></div></main>

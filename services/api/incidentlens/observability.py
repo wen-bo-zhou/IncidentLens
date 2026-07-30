@@ -15,7 +15,7 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 from prometheus_client.exposition import CONTENT_TYPE_LATEST
 
 _tracer_provider: TracerProvider | None = None
-_SENSITIVE_QUERY = re.compile(r"([?&]ticket=)[^&\s]*")
+_SENSITIVE_QUERY = re.compile(r"([?&](?:ticket|code|state)=)[^&\s]*")
 
 
 def redact_access_log_path(path: str) -> str:
@@ -145,6 +145,8 @@ def configure_observability(app: FastAPI) -> TelemetryMetrics:
             if (
                 request.headers.get("authorization") is not None
                 or request.query_params.get("ticket") is not None
+                or request.cookies.get("incidentlens_session") is not None
+                or request.url.path.startswith("/api/v1/auth/")
             ):
                 response.headers["Cache-Control"] = "no-store"
             return response

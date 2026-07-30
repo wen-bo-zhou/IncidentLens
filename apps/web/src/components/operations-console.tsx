@@ -16,6 +16,8 @@ import {
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
+import { useAuth } from "@/components/auth-context";
+import { SessionControl } from "@/components/session-control";
 import { api } from "@/lib/api";
 
 const PAGE_SIZE = 20;
@@ -44,37 +46,56 @@ function statusLabel(status: string): string {
 
 export function OperationsConsole() {
   const queryClient = useQueryClient();
+  const { session, isLoading: authLoading } = useAuth();
   const [tokenInput, setTokenInput] = useState("");
   const [token, setToken] = useState("");
   const [status, setStatus] = useState("");
   const [action, setAction] = useState("");
   const [investigationOffset, setInvestigationOffset] = useState(0);
   const [auditOffset, setAuditOffset] = useState(0);
+  const sessionAdmin = session.role === "admin";
+  const hasAdminAccess = sessionAdmin || Boolean(token);
+  const credentialKey = token || (sessionAdmin ? session.actor : "");
+  const requestToken = token || undefined;
 
   const investigations = useQuery({
-    queryKey: ["operations", "investigations", token, status, investigationOffset],
+    queryKey: [
+      "operations",
+      "investigations",
+      credentialKey,
+      status,
+      investigationOffset,
+    ],
     queryFn: () =>
-      api.investigationHistory(token, {
+      api.investigationHistory(requestToken, {
         status: status || undefined,
         limit: PAGE_SIZE,
         offset: investigationOffset,
       }),
-    enabled: Boolean(token),
+    enabled: hasAdminAccess,
   });
   const audits = useQuery({
-    queryKey: ["operations", "audits", token, action, auditOffset],
+    queryKey: [
+      "operations",
+      "audits",
+      credentialKey,
+      action,
+      auditOffset,
+    ],
     queryFn: () =>
-      api.auditEvents(token, {
+      api.auditEvents(requestToken, {
         action: action || undefined,
         limit: PAGE_SIZE,
         offset: auditOffset,
       }),
-    enabled: Boolean(token),
+    enabled: hasAdminAccess,
   });
 
   useEffect(() => {
-    if (!token) queryClient.removeQueries({ queryKey: ["operations"] });
-  }, [queryClient, token]);
+    if (!hasAdminAccess) {
+      queryClient.removeQueries({ queryKey: ["operations"] });
+    }
+  }, [hasAdminAccess, queryClient]);
 
   function authenticate(event: FormEvent) {
     event.preventDefault();
@@ -82,7 +103,15 @@ export function OperationsConsole() {
     if (nextToken) setToken(nextToken);
   }
 
-  if (!token) {
+  if (authLoading) {
+    return (
+      <main className="operations-page operations-gate">
+        <p className="ledger-empty">正在验证企业身份…</p>
+      </main>
+    );
+  }
+
+  if (!hasAdminAccess) {
     return (
       <main className="operations-page operations-gate">
         <Link className="operations-back" href="/">
@@ -93,9 +122,14 @@ export function OperationsConsole() {
           <span className="eyebrow">Operations clearance</span>
           <h1>打开运营中心</h1>
           <p>
-            调查历史和审计记录只向管理员开放。令牌仅保存在当前页面内存中，
-            关闭或刷新页面后自动清除。
+            调查历史和审计记录只向管理员开放。
+            {session.sso_enabled
+              ? " 使用企业 Admin 身份登录，或输入应急管理员令牌。"
+              : " 令牌仅保存在当前页面内存中，关闭或刷新页面后自动清除。"}
           </p>
+          {session.sso_enabled && (
+            <SessionControl returnTo="/operations" />
+          )}
           <label htmlFor="operations-admin-token">管理员令牌</label>
           <input
             id="operations-admin-token"
@@ -130,15 +164,19 @@ export function OperationsConsole() {
           <h1>运行与审计</h1>
           <p>从持久化记录中追踪每次调查、失败状态和管理员动作。</p>
         </div>
-        <button
-          className="operations-logout"
-          onClick={() => {
-            setToken("");
-            setTokenInput("");
-          }}
-        >
-          <LogOut size={15} /> 清除令牌
-        </button>
+        {sessionAdmin && !token ? (
+          <SessionControl returnTo="/operations" />
+        ) : (
+          <button
+            className="operations-logout"
+            onClick={() => {
+              setToken("");
+              setTokenInput("");
+            }}
+          >
+            <LogOut size={15} /> 清除令牌
+          </button>
+        )}
       </header>
 
       <section className="operations-tape" aria-label="运营摘要">
