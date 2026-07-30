@@ -148,11 +148,14 @@ with sync_playwright() as playwright:
 
     page.goto("http://127.0.0.1:3000/operations")
     page.wait_for_load_state("networkidle")
-    page.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
-    page.get_by_role("button", name="打开运营中心").click()
+    page.get_by_label("Runner 或 Admin 令牌").fill(ADMIN_TOKEN)
+    page.get_by_role("button", name="查看调查历史").click()
     page.get_by_role("heading", name="运行与审计").wait_for()
     page.get_by_role("heading", name="调查历史").wait_for()
     page.get_by_text("investigation.created", exact=True).first.wait_for()
+    page.locator("button[aria-label^='打开报告']").first.click()
+    page.locator(".history-report-panel").wait_for()
+    page.locator(".history-hypotheses h4").first.wait_for()
     page.screenshot(path=ARTIFACTS / "incidentlens-operations.png", full_page=True)
 
     mobile = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=1)
@@ -163,9 +166,11 @@ with sync_playwright() as playwright:
 
     mobile.goto("http://127.0.0.1:3000/operations")
     mobile.wait_for_load_state("networkidle")
-    mobile.get_by_label("管理员令牌").fill(ADMIN_TOKEN)
-    mobile.get_by_role("button", name="打开运营中心").click()
-    mobile.get_by_role("heading", name="运行与审计").wait_for()
+    mobile.get_by_label("Runner 或 Admin 令牌").fill(RUNNER_TOKEN)
+    mobile.get_by_role("button", name="查看调查历史").click()
+    mobile.get_by_role("heading", name="调查历史", exact=True).first.wait_for()
+    mobile.get_by_text("仅显示你创建的调查", exact=True).wait_for()
+    assert mobile.get_by_role("heading", name="审计轨迹").count() == 0
     mobile.screenshot(path=ARTIFACTS / "incidentlens-operations-mobile.png", full_page=True)
 
     assert not console_errors and not http_errors, (
@@ -176,5 +181,5 @@ with sync_playwright() as playwright:
 print(
     "E2E smoke passed: dashboard, private import catalog, bounded live SSE, "
     "inconclusive handling, metric/trace evidence, sandbox approval, evaluations, "
-    "operations ledger, mobile"
+    "recoverable Admin/Runner history, operations ledger, mobile"
 )

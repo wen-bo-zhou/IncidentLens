@@ -68,6 +68,10 @@ function authHeaders(token?: string): Record<string, string> {
 
 export const api = {
   session: () => request<AuthSession>("/api/v1/auth/session"),
+  credentialSession: (token: string) =>
+    request<AuthSession>("/api/v1/auth/session", {
+      headers: authHeaders(token),
+    }),
   loginUrl: (returnTo: string) =>
     `${API_URL}/api/v1/auth/login?${queryString({ return_to: returnTo })}`,
   logout: () =>

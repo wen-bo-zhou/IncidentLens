@@ -15,10 +15,12 @@
 
 ## Operations console and governance APIs
 
-Open `/operations` with an enterprise Admin session to inspect the durable
-investigation and audit ledgers. When browser SSO is disabled or unavailable,
-a separately managed administrator token remains available as an in-memory
-break-glass path; refreshing or leaving the page clears it.
+Open `/operations` with an enterprise Runner or Admin session to inspect
+durable investigation history and reopen completed reports. Runner identities
+see only investigations they created. Admin identities additionally see every
+investigation and the audit ledger. When browser SSO is disabled or
+unavailable, a separately managed Runner or Admin token remains available as
+an in-memory break-glass path; refreshing or leaving the page clears it.
 
 - Investigation history: `GET /api/v1/investigations` (runner or admin)
 - Investigation detail: `GET /api/v1/investigations/{id}` (runner or admin)

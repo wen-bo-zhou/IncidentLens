@@ -144,7 +144,7 @@ def create_app(
         active_oidc_browser_client = owned_oidc_browser_client
     app = FastAPI(
         title="IncidentLens API",
-        version="0.9.0",
+        version="1.0.0",
         description="Evidence-first production incident investigation assistant",
     )
     app.state.repository = repository

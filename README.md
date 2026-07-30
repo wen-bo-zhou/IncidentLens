@@ -18,6 +18,7 @@ Evidence-first AI production incident investigation assistant. It correlates log
 - Durable per-client authentication-failure throttling with trusted-proxy parsing, HMAC identifiers and `Retry-After` responses.
 - Optional OIDC JWT federation with strict issuer/audience validation, cached JWKS rotation and IdP-group-to-role mapping.
 - Browser enterprise SSO with Authorization Code + PKCE S256, nonce-bound ID-token validation, opaque server sessions, logout and CSRF protection.
+- Recoverable investigation history: Runner identities can reopen their own durable reports after a refresh, while Admin identities retain the global audit view.
 - Next.js incident console, causal-spine timeline, evidence dialog and evaluation console.
 - Prometheus metrics, OpenTelemetry spans, Docker Compose and optional Grafana/Tempo profile.
 - Deterministic one-shot baseline versus Agent evaluation, Markdown export and admin-approved sandbox simulation.
@@ -46,10 +47,13 @@ pnpm dev
 
 Open `http://localhost:3000`. Without `MODEL_API_KEY`, the application runs the deterministic, fully auditable offline investigation path.
 
-Administrators can open `http://localhost:3000/operations` to filter durable
-investigation history and audit events. With browser SSO configured, an Admin
-session opens it directly. Static credentials remain an optional in-memory
-break-glass path and are cleared on refresh.
+Runner and Admin identities can open `http://localhost:3000/operations` to
+filter durable investigation history and reopen completed reports after a
+refresh. Runner identities see only investigations they created; Admin
+identities additionally see the global audit ledger. With browser SSO
+configured, the active enterprise session opens the permitted view directly.
+Static credentials remain an optional in-memory break-glass path and are
+cleared on refresh.
 
 Live investigation details require a runner or administrator token. The web
 client exchanges that credential for a five-minute SSE ticket, uses it only for
@@ -142,7 +146,7 @@ IncidentLens 是一个证据优先的 AI 生产事故调查助手。它把日志
 
 默认无需模型密钥即可回放全部演示；配置任意 OpenAI-compatible 接口后，系统会调用模型生成结构化事故叙述，但根因排名与质量门槛仍由确定性评分控制。详细设计见 `docs/architecture.md`、`docs/evaluation.md` 和 `docs/threat-model.md`。
 
-管理员可以打开 `/operations` 查看可筛选的调查历史和审计轨迹；Runner 每日配额已持久化到数据库，服务重启或多 Worker 部署不会重置计数。浏览器可通过授权码 + PKCE 登录，访问令牌和 ID Token 只在回调时由服务端验证并立即丢弃，浏览器仅持有 HttpOnly 会话 Cookie；写请求还必须携带 CSRF 头。事件流使用五分钟有效、绑定单次调查且数据库只保存哈希的短期票据。生产模式会拒绝演示、弱口令、跨角色重复凭证和通配 CORS，并支持用命名凭证区分值班人员。
+Runner 和管理员都可以打开 `/operations` 查看可筛选的持久化调查历史，并在刷新后重新打开已完成报告；Runner 只能看到自己创建的记录，管理员还能查看全局审计轨迹。Runner 每日配额已持久化到数据库，服务重启或多 Worker 部署不会重置计数。浏览器可通过授权码 + PKCE 登录，访问令牌和 ID Token 只在回调时由服务端验证并立即丢弃，浏览器仅持有 HttpOnly 会话 Cookie；写请求还必须携带 CSRF 头。事件流使用五分钟有效、绑定单次调查且数据库只保存哈希的短期票据。生产模式会拒绝演示、弱口令、跨角色重复凭证和通配 CORS，并支持用命名凭证区分值班人员。
 
 导入的生产事故默认属于私有目录，匿名访问只能看到内置演示；Runner/Admin
 令牌可以临时解锁私有目录，但导入事故不会生成公开回放，服务重启后也不会改变这一边界。

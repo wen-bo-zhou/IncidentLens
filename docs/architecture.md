@@ -17,7 +17,10 @@ Operational governance is database-backed. Runner identity is represented only
 by a SHA-256 token digest in the daily quota table, and quota consumption uses
 an atomic conditional update so restarts and multiple API workers share the same
 limit. Runner/admin users can read paginated investigation history; only admins
-can read the filtered audit ledger exposed by the `/operations` console.
+can read the filtered audit ledger exposed by the `/operations` console. The
+same console is a recovery surface: Runner identities can reopen only their own
+durable reports after navigation or refresh, while Admin identities can reopen
+any report and retain the audit view.
 
 Access configuration supports either one legacy token per role or named JSON
 credential maps. A non-empty named map replaces the legacy token for that role;

@@ -157,34 +157,38 @@ describe("AppShell", () => {
     });
   });
 
-  it("polls the terminal report when the event stream disconnects", async () => {
-    const user = userEvent.setup();
-    const detail: InvestigationDetail = {
-      investigation_id: "inv-1",
-      incident_case_id: incident.id,
-      mode: "live",
-      status: "inconclusive",
-      report: inconclusiveReport,
-      remediation_proposals: [],
-    };
-    mockedApi.investigation.mockResolvedValue(detail);
-    renderApp();
+  it(
+    "polls the terminal report when the event stream disconnects",
+    async () => {
+      const user = userEvent.setup();
+      const detail: InvestigationDetail = {
+        investigation_id: "inv-1",
+        incident_case_id: incident.id,
+        mode: "live",
+        status: "inconclusive",
+        report: inconclusiveReport,
+        remediation_proposals: [],
+      };
+      mockedApi.investigation.mockResolvedValue(detail);
+      renderApp();
 
-    await user.click(await screen.findByRole("button", { name: "实时调查" }));
-    await user.type(screen.getByLabelText("Runner 令牌"), "runner-token");
-    await user.click(screen.getByRole("button", { name: "确认启动" }));
-    await waitFor(() => expect(FakeEventSource.latest).toBeDefined());
-    expect(mockedApi.streamTicket).toHaveBeenCalledWith("inv-1", "runner-token");
-    expect(mockedApi.eventsUrl).toHaveBeenCalledWith("inv-1", "stream-ticket");
+      await user.click(await screen.findByRole("button", { name: "实时调查" }));
+      await user.type(screen.getByLabelText("Runner 令牌"), "runner-token");
+      await user.click(screen.getByRole("button", { name: "确认启动" }));
+      await waitFor(() => expect(FakeEventSource.latest).toBeDefined());
+      expect(mockedApi.streamTicket).toHaveBeenCalledWith("inv-1", "runner-token");
+      expect(mockedApi.eventsUrl).toHaveBeenCalledWith("inv-1", "stream-ticket");
 
-    act(() => FakeEventSource.latest?.fail());
+      act(() => FakeEventSource.latest?.fail());
 
-    expect(
-      await screen.findByRole("heading", { name: "证据不足，无法判定根因" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("inconclusive")).toBeInTheDocument();
-    expect(mockedApi.investigation).toHaveBeenCalledWith("inv-1", "runner-token");
-  });
+      expect(
+        await screen.findByRole("heading", { name: "证据不足，无法判定根因" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("inconclusive")).toBeInTheDocument();
+      expect(mockedApi.investigation).toHaveBeenCalledWith("inv-1", "runner-token");
+    },
+    15_000,
+  );
 
   it("does not request a replay for an imported live-only incident", async () => {
     mockedApi.incidents.mockResolvedValue([

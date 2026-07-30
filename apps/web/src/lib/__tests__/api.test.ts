@@ -239,4 +239,27 @@ describe("api", () => {
     expect(logoutInit.credentials).toBe("include");
     expect(new Headers(logoutInit.headers).get("X-IncidentLens-CSRF")).toBe("1");
   });
+
+  it("can inspect the role attached to a static operator credential", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        authenticated: true,
+        sso_enabled: false,
+        role: "runner",
+        actor: "on-call-runner",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.credentialSession("runner-token");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/auth/session",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer runner-token",
+        }),
+      }),
+    );
+  });
 });
