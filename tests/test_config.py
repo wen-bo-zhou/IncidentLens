@@ -6,6 +6,10 @@ from pydantic import ValidationError
 def _production_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "app_env": "production",
+        "database_url": (
+            "postgresql+psycopg://incidentlens:strong-production-password@"
+            "db.example.com:5432/incidentlens?sslmode=verify-full"
+        ),
         "runner_credentials": {
             "oncall-primary": "runner-production-token-000000000001"
         },
@@ -279,3 +283,32 @@ def test_production_accepts_named_strong_credentials_and_exact_origins() -> None
     assert list(settings.runner_credentials) == ["oncall-primary"]
     assert list(settings.admin_credentials) == ["security-lead"]
     assert settings.cors_origins == ["https://incidentlens.example.com"]
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "sqlite:///data/runtime/incidentlens.db",
+        "postgresql+psycopg://incidentlens:strong-password@db/incidentlens",
+        (
+            "postgresql+psycopg://incidentlens:strong-password@db/incidentlens"
+            "?sslmode=require"
+        ),
+    ],
+)
+def test_production_database_requires_verified_postgres_tls(
+    database_url: str,
+) -> None:
+    with pytest.raises(ValidationError, match="sslmode=verify-full"):
+        _production_settings(database_url=database_url)
+
+
+@pytest.mark.parametrize("password", ["incidentlens", "too-short"])
+def test_production_rejects_weak_database_passwords(password: str) -> None:
+    with pytest.raises(ValidationError, match="database password"):
+        _production_settings(
+            database_url=(
+                f"postgresql+psycopg://incidentlens:{password}@db/incidentlens"
+                "?sslmode=verify-full"
+            )
+        )

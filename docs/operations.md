@@ -298,17 +298,48 @@ that allowlist. The provided API container starts Uvicorn with
 
 ## Database lifecycle
 
+Compose no longer supplies a default database password. Set a generated secret
+in `POSTGRES_PASSWORD` and put the same percent-encoded value in
+`COMPOSE_DATABASE_URL`. Production startup rejects SQLite, weak database
+passwords, and PostgreSQL connections without `sslmode=verify-full`.
+
 The API container runs `alembic upgrade head` before serving traffic. Before an upgrade, create a backup:
 
 ```bash
 docker compose exec -T postgres pg_dump -U incidentlens -Fc incidentlens > incidentlens.dump
 ```
 
-Restore into a stopped or empty environment:
+The default Compose stack runs scheduled logical backups. The backup service
+writes atomic custom-format dumps to the `postgres-backups` volume and deletes
+dumps older than `BACKUP_RETENTION_DAYS` (14 days by default). To start only
+the database and backup service:
 
 ```bash
-docker compose exec -T postgres pg_restore -U incidentlens -d incidentlens --clean --if-exists < incidentlens.dump
+docker compose up -d postgres postgres-backup
 ```
+
+List available backups before restoring:
+
+```bash
+docker compose run --rm --entrypoint sh postgres-restore -c "ls -lh /backups"
+```
+
+Stop API and Worker traffic, choose an exact file from that list, and restore
+it through the guarded restore profile:
+
+```bash
+BACKUP_FILE=/backups/incidentlens-YYYYMMDDTHHMMSSZ.dump \
+  docker compose --profile restore run --rm postgres-restore
+```
+
+Run a restore drill at least quarterly against a disposable database, record
+the measured recovery time, and verify investigation/audit record counts and a
+sample report before declaring the drill successful. The included logical
+backup service provides recoverable scheduled snapshots, not point-in-time
+recovery. Production RPO requirements below the backup interval require a
+managed PostgreSQL service with continuous WAL archiving (or an independently
+operated WAL archive), encrypted off-site storage, and a tested timestamp-based
+restore procedure.
 
 Schema rollback for the initial release is destructive and should only be used against a disposable environment:
 

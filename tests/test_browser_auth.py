@@ -100,6 +100,10 @@ def _browser_client(
     **settings_overrides: object,
 ) -> tuple[TestClient, BrowserIdentityProvider]:
     settings_values: dict[str, object] = {
+        "database_url": (
+            "postgresql+psycopg://incidentlens:test-browser-database-secret@"
+            "db.example.com:5432/incidentlens?sslmode=verify-full"
+        ),
         "oidc_issuer": _ISSUER,
         "oidc_audience": "incidentlens-api",
         "oidc_jwks_url": f"{_ISSUER}/jwks",

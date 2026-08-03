@@ -4,7 +4,7 @@ from binascii import Error as Base64DecodeError
 from functools import lru_cache
 from ipaddress import ip_network
 from typing import Literal, Self
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -318,6 +318,18 @@ class Settings(BaseSettings):
                     "Production rate-limit secret must encode at least 32 random "
                     "bytes as unpadded base64url"
                 )
+            database = urlsplit(self.database_url)
+            database_query = parse_qs(database.query)
+            ssl_modes = database_query.get("sslmode")
+            if not database.scheme.startswith("postgresql") or ssl_modes != [
+                "verify-full"
+            ]:
+                raise ValueError(
+                    "Production database URL must use PostgreSQL with sslmode=verify-full"
+                )
+            database_password = unquote(database.password or "")
+            if len(database_password) < 16 or database_password == "incidentlens":
+                raise ValueError("Production database password must contain at least 16 characters")
         return self
 
     @property

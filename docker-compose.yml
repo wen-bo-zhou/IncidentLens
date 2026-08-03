@@ -2,7 +2,7 @@ name: incidentlens
 
 x-api-environment: &api-environment
   APP_ENV: ${APP_ENV:-development}
-  DATABASE_URL: postgresql+psycopg://incidentlens:incidentlens@postgres:5432/incidentlens
+  DATABASE_URL: "${COMPOSE_DATABASE_URL:?Set COMPOSE_DATABASE_URL with the encoded database password}"
   REDIS_URL: redis://redis:6379/0
   TASK_MODE: celery
   MODEL_BASE_URL: ${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
@@ -44,10 +44,11 @@ x-api-environment: &api-environment
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: incidentlens
-      POSTGRES_USER: incidentlens
-      POSTGRES_PASSWORD: incidentlens
+      POSTGRES_DB: ${POSTGRES_DB:-incidentlens}
+      POSTGRES_USER: ${POSTGRES_USER:-incidentlens}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a strong secret}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -55,9 +56,15 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   redis:
     image: redis:7.4-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -66,11 +73,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
 
   api:
     build:
       context: .
       dockerfile: services/api/Dockerfile
+    restart: unless-stopped
     environment: *api-environment
     depends_on:
       postgres: { condition: service_healthy }
@@ -80,16 +93,36 @@ services:
       interval: 10s
       timeout: 4s
       retries: 12
+      start_period: 15s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   worker:
     build:
       context: .
       dockerfile: services/api/Dockerfile
+    restart: unless-stopped
     command: ["celery", "-A", "incidentlens.tasks.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
     environment: *api-environment
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A incidentlens.tasks.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 5 | grep -q pong"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
   web:
     build:
@@ -97,21 +130,88 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ""
+    restart: unless-stopped
     environment:
       API_PROXY_TARGET: http://api:8000
     depends_on:
       api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
 
   caddy:
     image: caddy:2.10-alpine
+    restart: unless-stopped
     ports:
       - "3000:80"
     volumes:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     depends_on:
-      - web
-      - api
+      web: { condition: service_healthy }
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health/live | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  postgres-backup:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/incidentlens/backup-postgres.sh"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-incidentlens}
+      POSTGRES_USER: ${POSTGRES_USER:-incidentlens}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a strong secret}"
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./scripts/backup-postgres.sh:/opt/incidentlens/backup-postgres.sh:ro
+      - postgres-backups:/backups
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/incidentlens-backup-ready"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  postgres-restore:
+    image: pgvector/pgvector:pg16
+    profiles: ["restore"]
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/incidentlens/restore-postgres.sh"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-incidentlens}
+      POSTGRES_USER: ${POSTGRES_USER:-incidentlens}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a strong secret}"
+      BACKUP_FILE: ${BACKUP_FILE:-}
+    volumes:
+      - ./scripts/restore-postgres.sh:/opt/incidentlens/restore-postgres.sh:ro
+      - postgres-backups:/backups:ro
+    depends_on:
+      postgres: { condition: service_healthy }
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.140.0
@@ -158,5 +258,6 @@ services:
 
 volumes:
   postgres-data:
+  postgres-backups:
   redis-data:
   caddy-data:

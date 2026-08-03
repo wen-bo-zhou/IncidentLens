@@ -109,6 +109,11 @@ reuse the same client-generated key.
 
 ## Docker
 
+Copy `.env.example` to `.env`, generate a strong PostgreSQL password, and set
+both `POSTGRES_PASSWORD` and `COMPOSE_DATABASE_URL`. The URL password must be
+percent-encoded. Local Compose may use `sslmode=disable`; production startup
+requires an external TLS-enabled PostgreSQL URL with `sslmode=verify-full`.
+
 ```powershell
 docker compose up --build
 ```
@@ -121,6 +126,8 @@ docker compose --profile observability up --build
 ```
 
 Grafana is exposed at `http://localhost:3001` and Prometheus at `http://localhost:9090`.
+The default Compose stack also starts scheduled logical backups. See
+`docs/operations.md` before restoring or configuring point-in-time recovery.
 
 ## Tests
 
